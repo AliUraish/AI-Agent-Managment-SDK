@@ -1,5 +1,94 @@
 # Changelog
 
+## [1.3.0] - 2025-01-30
+
+### Added - Sliding TTL (Smart Session Lifetime Management)
+
+#### 🔄 Sliding TTL Implementation
+- ✅ **Session Access Tracking**: `last_access_time` field in `SessionInfo`
+- ✅ **Automatic TTL Reset**: Every session access resets the expiry timer
+- ✅ **Smart Expiry Logic**: Sessions expire based on last access, not creation time
+- ✅ **Active Session Protection**: Prevents expiry of actively used sessions
+
+#### 🛠️ New Methods
+- 🔧 `touch_session(session_id)` - Manually reset session TTL
+- 🔍 `is_session_active(session_id)` - Check if session is active (with TTL reset)
+- ⏱️ `get_session_ttl_remaining(session_id)` - Get remaining TTL in hours
+- 📊 Enhanced `get_session_stats()` with idle time analytics
+
+#### 📈 Enhanced Session Statistics
+```python
+stats = perf_tracker.get_session_stats()
+# Returns:
+{
+    'total_cached_sessions': 5,
+    'active_sessions': 4,
+    'sliding_ttl_enabled': True,
+    'avg_idle_time_hours': 2.5,
+    'longest_idle_time_hours': 8.2,
+    'shortest_idle_time_hours': 0.1,
+    'ttl_hours': 10.0
+}
+```
+
+#### 🎯 Automatic TTL Reset Triggers
+- ✅ `end_conversation()` - TTL reset on conversation end
+- ✅ `record_failed_session()` - TTL reset on failure recording
+- ✅ `is_session_active()` - TTL reset on status check
+- ✅ `get_session_ttl_remaining()` - TTL reset on remaining time query
+- ✅ `touch_session()` - Manual TTL reset
+
+#### 🔄 Sliding TTL Behavior
+**Regular TTL**: Session expires X hours after creation
+```
+Session Created → [10 hours] → Expired (regardless of usage)
+```
+
+**Sliding TTL**: Session expires X hours after last access
+```
+Session Created → Access → [TTL Reset] → Access → [TTL Reset] → ... → [10h idle] → Expired
+```
+
+#### 💡 Usage Examples
+
+**Manual Session Touch**:
+```python
+# Keep session alive manually
+perf_tracker.touch_session(session_id)
+```
+
+**Check Session Status**:
+```python
+# Automatically resets TTL on check
+is_alive = perf_tracker.is_session_active(session_id)
+remaining = perf_tracker.get_session_ttl_remaining(session_id)
+```
+
+**Session Analytics**:
+```python
+stats = perf_tracker.get_session_stats()
+print(f"Average idle time: {stats['avg_idle_time_hours']} hours")
+print(f"Longest idle session: {stats['longest_idle_time_hours']} hours")
+```
+
+#### 🎯 Benefits
+- 🚀 **Intelligent Cleanup**: Only expires truly inactive sessions
+- 💾 **Memory Efficiency**: Active sessions don't consume unnecessary memory
+- 🔄 **Automatic Management**: No manual intervention needed
+- 📊 **Rich Analytics**: Detailed session activity insights
+- ⚡ **Performance Optimized**: Minimal overhead for active conversations
+
+#### 🔧 Configuration
+```python
+perf_tracker = AgentPerformanceTracker(
+    base_url="https://api.example.com",
+    session_ttl_hours=10.0,        # Sliding TTL window
+    cleanup_interval_minutes=30    # Background cleanup frequency
+)
+```
+
+---
+
 ## [1.2.0] - 2025-01-30
 
 ### Added - Lightweight Session Tracking with TTL
