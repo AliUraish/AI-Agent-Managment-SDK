@@ -121,7 +121,6 @@ def performance_example():
             # Simulate conversation end with quality score
             perf_tracker.end_conversation(
                 session_id=session_id,
-                agent_id="agent_001",  # Now required parameter
                 quality_score=ConversationQuality.GOOD,
                 user_feedback="Very helpful agent!",
                 message_count=15,
@@ -143,7 +142,6 @@ def performance_example():
             # Record a failed session
             perf_tracker.record_failed_session(
                 session_id=failed_session,
-                agent_id="agent_001",  # Now required parameter
                 error_message="Connection timeout",
                 metadata={
                     "error_code": "TIMEOUT_001",
@@ -172,6 +170,10 @@ def performance_example():
         perf_overview = perf_tracker.get_performance_overview(agent_id="agent_001")
         if perf_overview:
             logger.info("Performance overview retrieved")
+        
+        # Check session cache statistics
+        session_stats = perf_tracker.get_session_stats()
+        logger.info("Session cache stats: %s", session_stats)
     
     except Exception as e:
         logger.error("Error during performance tracking: %s", str(e))
@@ -224,7 +226,6 @@ async def async_example():
             # End conversation with performance data
             perf_tracker.end_conversation(
                 session_id=session_id,
-                agent_id="agent_002",  # Now required parameter
                 quality_score=ConversationQuality.EXCELLENT,
                 message_count=8
             )
