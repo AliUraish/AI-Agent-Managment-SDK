@@ -106,31 +106,6 @@ class AgentStatus(Enum):
     INITIALIZING = "initializing"
 
 
-class ConversationQuality(Enum):
-    """Enumeration for conversation quality ratings"""
-    EXCELLENT = 5
-    GOOD = 4
-    AVERAGE = 3
-    POOR = 2
-    VERY_POOR = 1
-
-    @classmethod
-    def from_int(cls, value: int) -> 'ConversationQuality':
-        """Convert integer to ConversationQuality enum"""
-        for quality in cls:
-            if quality.value == value:
-                return quality
-        raise ValueError(f"Invalid quality score: {value}. Must be 1-5.")
-
-    @classmethod
-    def from_int_safe(cls, value: int) -> Optional['ConversationQuality']:
-        """Safely convert integer to ConversationQuality enum, returns None if invalid"""
-        try:
-            return cls.from_int(value)
-        except ValueError:
-            return None
-
-
 @dataclass
 class APIResponse:
     """Standard response structure from backend API"""
@@ -160,41 +135,21 @@ class AgentStatusData:
 
 
 @dataclass
-class ConversationStartData:
-    """Data structure for conversation start"""
-    session_id: str
+class ActivityLogData:
+    """Data structure for activity logging"""
     agent_id: str
-    start_time: str
-    user_id: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = None
-
-
-@dataclass
-class ConversationEndData:
-    """Data structure for conversation end"""
-    session_id: str
-    agent_id: str
-    start_time: str
-    end_time: str
-    duration_seconds: float
-    status: str  # "completed" or "failed"
-    quality_score: Optional[int] = None
-    user_feedback: Optional[str] = None
-    error_message: Optional[str] = None
-    message_count: Optional[int] = None
-    metadata: Optional[Dict[str, Any]] = None
+    action: str
+    timestamp: str
+    details: Dict[str, Any]
+    duration: Optional[float] = None
 
 
 class AgentOperationsTracker:
     """
-    API-based Agent Operations Tracker that sends data to backend instead of storing in memory.
-    
-    Integrates with backend API endpoints:
-    - POST /agents/register
-    - POST /agents/status
-    - POST /conversations/start
-    - POST /conversations/end
-    - GET /system/overview
+    Agent Operations Tracker - Handles only operational aspects:
+    - Active agents monitoring
+    - Agent status management  
+    - Recent activity logging
     """
     
     def __init__(self, 
@@ -205,7 +160,7 @@ class AgentOperationsTracker:
                  retry_delay: float = 1.0,
                  enable_async: bool = False,
                  logger: Optional[logging.Logger] = None):
-        """Initialize the API-based tracker"""
+        """Initialize the Agent Operations Tracker"""
         self.base_url = base_url.rstrip('/')
         self.timeout = timeout
         self.max_retries = max_retries
@@ -218,9 +173,6 @@ class AgentOperationsTracker:
         
         # Initialize secure API client
         self.api_client = SecureAPIClient(base_url, api_key)
-        
-        # Track active sessions locally (minimal memory usage)
-        self._active_sessions: Dict[str, str] = {}
         
         # Log initialization without exposing API key
         self.logger.info(
@@ -285,7 +237,7 @@ class AgentOperationsTracker:
                     )
         
         return APIResponse(success=False, error="Max retries exceeded")
-    
+
     async def _make_request_async(self, method: str, endpoint: str, data: Optional[Dict] = None) -> APIResponse:
         """Make async HTTP request with retry logic"""
         if not self.enable_async:
@@ -415,182 +367,134 @@ class AgentOperationsTracker:
             self.logger.error(f"Failed to update agent {agent_id} status: {response.error}")
             return False
     
-    def start_conversation(self, agent_id: str, session_id: Optional[str] = None,
-                          user_id: Optional[str] = None,
-                          metadata: Optional[Dict[str, Any]] = None) -> Optional[str]:
-        """Start tracking a new conversation"""
-        session_id = session_id or str(uuid.uuid4())
-        start_time = datetime.now()
-        
-        data = asdict(ConversationStartData(
-            session_id=session_id,
+    def log_activity(self, agent_id: str, action: str, details: Dict[str, Any],
+                    duration: Optional[float] = None) -> bool:
+        """Log agent activity to the backend"""
+        data = asdict(ActivityLogData(
             agent_id=agent_id,
-            start_time=start_time.isoformat(),
-            user_id=user_id,
-            metadata=metadata
+            action=action,
+            timestamp=datetime.now().isoformat(),
+            details=details,
+            duration=duration
         ))
         
-        response = self._make_request('POST', '/conversations/start', data)
+        response = self._make_request('POST', '/agents/activity', data)
         
         if response.success:
-            # Track session locally for validation
-            self._active_sessions[session_id] = agent_id
-            self.logger.info(f"Conversation {session_id} started for agent {agent_id}")
-            return session_id
-        else:
-            self.logger.error(f"Failed to start conversation: {response.error}")
-            return None
-    
-    async def start_conversation_async(self, agent_id: str, session_id: Optional[str] = None,
-                                      user_id: Optional[str] = None,
-                                      metadata: Optional[Dict[str, Any]] = None) -> Optional[str]:
-        """Async version of start_conversation"""
-        session_id = session_id or str(uuid.uuid4())
-        start_time = datetime.now()
-        
-        data = asdict(ConversationStartData(
-            session_id=session_id,
-            agent_id=agent_id,
-            start_time=start_time.isoformat(),
-            user_id=user_id,
-            metadata=metadata
-        ))
-        
-        response = await self._make_request_async('POST', '/conversations/start', data)
-        
-        if response.success:
-            self._active_sessions[session_id] = agent_id
-            self.logger.info(f"Conversation {session_id} started for agent {agent_id}")
-            return session_id
-        else:
-            self.logger.error(f"Failed to start conversation: {response.error}")
-            return None
-    
-    def end_conversation(self, session_id: str, 
-                        start_time: Optional[datetime] = None,
-                        quality_score: Optional[Union[int, ConversationQuality]] = None,
-                        user_feedback: Optional[str] = None,
-                        message_count: Optional[int] = None,
-                        metadata: Optional[Dict[str, Any]] = None) -> bool:
-        """End a conversation and send metrics to backend"""
-        # Validate session exists
-        agent_id = self._active_sessions.get(session_id)
-        if not agent_id:
-            self.logger.warning(f"Attempted to end unknown session: {session_id}")
-            return False
-        
-        end_time = datetime.now()
-        
-        # Calculate duration (if start_time not provided, estimate from recent time)
-        if start_time is None:
-            # Estimate duration as 0 if we don't have start time
-            duration_seconds = 0.0
-            start_time_iso = end_time.isoformat()
-        else:
-            duration_seconds = (end_time - start_time).total_seconds()
-            start_time_iso = start_time.isoformat()
-        
-        # Handle quality score conversion
-        quality_value = None
-        if quality_score is not None:
-            if isinstance(quality_score, int):
-                quality_enum = ConversationQuality.from_int_safe(quality_score)
-                quality_value = quality_enum.value if quality_enum else None
-            elif isinstance(quality_score, ConversationQuality):
-                quality_value = quality_score.value
-        
-        data = asdict(ConversationEndData(
-            session_id=session_id,
-            agent_id=agent_id,
-            start_time=start_time_iso,
-            end_time=end_time.isoformat(),
-            duration_seconds=duration_seconds,
-            status="completed",
-            quality_score=quality_value,
-            user_feedback=user_feedback,
-            message_count=message_count,
-            metadata=metadata
-        ))
-        
-        response = self._make_request('POST', '/conversations/end', data)
-        
-        if response.success:
-            # Remove from active sessions
-            self._active_sessions.pop(session_id, None)
-            self.logger.info(f"Conversation {session_id} completed successfully")
+            self.logger.debug(f"Activity logged for agent {agent_id}: {action}")
             return True
         else:
-            self.logger.error(f"Failed to end conversation {session_id}: {response.error}")
+            self.logger.error(f"Failed to log activity for agent {agent_id}: {response.error}")
             return False
     
-    def record_failed_session(self, session_id: str, error_message: str,
-                             start_time: Optional[datetime] = None,
-                             agent_id: Optional[str] = None,
-                             metadata: Optional[Dict[str, Any]] = None) -> bool:
-        """Record a failed conversation session"""
-        # Try to get agent_id from active sessions or use provided one
-        if not agent_id:
-            agent_id = self._active_sessions.get(session_id, "unknown")
-        
-        end_time = datetime.now()
-        
-        # Calculate duration
-        if start_time is None:
-            duration_seconds = 0.0
-            start_time_iso = end_time.isoformat()
-        else:
-            duration_seconds = (end_time - start_time).total_seconds()
-            start_time_iso = start_time.isoformat()
-        
-        data = asdict(ConversationEndData(
-            session_id=session_id,
+    async def log_activity_async(self, agent_id: str, action: str, details: Dict[str, Any],
+                                duration: Optional[float] = None) -> bool:
+        """Async version of log_activity"""
+        data = asdict(ActivityLogData(
             agent_id=agent_id,
-            start_time=start_time_iso,
-            end_time=end_time.isoformat(),
-            duration_seconds=duration_seconds,
-            status="failed",
-            error_message=error_message,
-            metadata=metadata
+            action=action,
+            timestamp=datetime.now().isoformat(),
+            details=details,
+            duration=duration
         ))
         
-        response = self._make_request('POST', '/conversations/end', data)
+        response = await self._make_request_async('POST', '/agents/activity', data)
         
         if response.success:
-            # Remove from active sessions
-            self._active_sessions.pop(session_id, None)
-            self.logger.info(f"Failed conversation {session_id} recorded")
+            self.logger.debug(f"Activity logged for agent {agent_id}: {action}")
             return True
         else:
-            self.logger.error(f"Failed to record failed session {session_id}: {response.error}")
+            self.logger.error(f"Failed to log activity for agent {agent_id}: {response.error}")
             return False
     
-    def get_system_overview(self) -> Optional[Dict[str, Any]]:
-        """Get system overview from backend (used by dashboard)"""
-        response = self._make_request('GET', '/system/overview')
+    def get_active_agents(self) -> Optional[Dict[str, Any]]:
+        """Get list of currently active agents"""
+        response = self._make_request('GET', '/agents/active')
         
         if response.success:
             return response.data
         else:
-            self.logger.error(f"Failed to get system overview: {response.error}")
+            self.logger.error(f"Failed to get active agents: {response.error}")
             return None
     
-    async def get_system_overview_async(self) -> Optional[Dict[str, Any]]:
-        """Async version of get_system_overview"""
-        response = await self._make_request_async('GET', '/system/overview')
+    async def get_active_agents_async(self) -> Optional[Dict[str, Any]]:
+        """Async version of get_active_agents"""
+        response = await self._make_request_async('GET', '/agents/active')
         
         if response.success:
             return response.data
         else:
-            self.logger.error(f"Failed to get system overview: {response.error}")
+            self.logger.error(f"Failed to get active agents: {response.error}")
             return None
     
-    def get_active_sessions_count(self) -> int:
-        """Get count of locally tracked active sessions"""
-        return len(self._active_sessions)
+    def get_agent_status(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        """Get current status of a specific agent"""
+        response = self._make_request('GET', f'/agents/{agent_id}/status')
+        
+        if response.success:
+            return response.data
+        else:
+            self.logger.error(f"Failed to get agent status for {agent_id}: {response.error}")
+            return None
     
-    def is_session_active(self, session_id: str) -> bool:
-        """Check if a session is currently active (locally tracked)"""
-        return session_id in self._active_sessions
+    async def get_agent_status_async(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        """Async version of get_agent_status"""
+        response = await self._make_request_async('GET', f'/agents/{agent_id}/status')
+        
+        if response.success:
+            return response.data
+        else:
+            self.logger.error(f"Failed to get agent status for {agent_id}: {response.error}")
+            return None
+    
+    def get_recent_activity(self, limit: int = 50, agent_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Get recent activity logs"""
+        endpoint = '/agents/activity'
+        if agent_id:
+            endpoint = f'/agents/{agent_id}/activity'
+        
+        params = {'limit': limit}
+        response = self._make_request('GET', f"{endpoint}?limit={limit}")
+        
+        if response.success:
+            return response.data
+        else:
+            self.logger.error(f"Failed to get recent activity: {response.error}")
+            return None
+    
+    async def get_recent_activity_async(self, limit: int = 50, agent_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Async version of get_recent_activity"""
+        endpoint = '/agents/activity'
+        if agent_id:
+            endpoint = f'/agents/{agent_id}/activity'
+        
+        response = await self._make_request_async('GET', f"{endpoint}?limit={limit}")
+        
+        if response.success:
+            return response.data
+        else:
+            self.logger.error(f"Failed to get recent activity: {response.error}")
+            return None
+    
+    def get_operations_overview(self) -> Optional[Dict[str, Any]]:
+        """Get operations overview (active agents, status distribution, recent activity summary)"""
+        response = self._make_request('GET', '/operations/overview')
+        
+        if response.success:
+            return response.data
+        else:
+            self.logger.error(f"Failed to get operations overview: {response.error}")
+            return None
+    
+    async def get_operations_overview_async(self) -> Optional[Dict[str, Any]]:
+        """Async version of get_operations_overview"""
+        response = await self._make_request_async('GET', '/operations/overview')
+        
+        if response.success:
+            return response.data
+        else:
+            self.logger.error(f"Failed to get operations overview: {response.error}")
+            return None
     
     async def close_async(self):
         """Close resources asynchronously"""
@@ -604,19 +508,19 @@ class AgentOperationsTracker:
         if hasattr(self, 'api_client'):
             self.api_client.close()
         self.logger.info("AgentOperationsTracker closed securely")
-    
+
     def __enter__(self):
         """Context manager entry"""
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit"""
         self.close()
-    
+
     async def __aenter__(self):
         """Async context manager entry"""
         return self
-    
+
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit"""
         await self.close_async()
