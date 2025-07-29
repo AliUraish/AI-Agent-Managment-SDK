@@ -48,11 +48,21 @@ class SessionInfo:
     agent_id: str
     start_time: datetime
     user_id: Optional[str] = None
+    last_access_time: Optional[datetime] = None  # For sliding TTL
+    
+    def __post_init__(self):
+        """Initialize last_access_time if not provided"""
+        if self.last_access_time is None:
+            self.last_access_time = self.start_time
     
     def is_expired(self, ttl_hours: float) -> bool:
-        """Check if session has expired based on TTL"""
-        expiry_time = self.start_time + timedelta(hours=ttl_hours)
+        """Check if session has expired based on sliding TTL (last access time)"""
+        expiry_time = self.last_access_time + timedelta(hours=ttl_hours)
         return datetime.now() > expiry_time
+    
+    def touch(self):
+        """Update last access time (sliding TTL)"""
+        self.last_access_time = datetime.now()
 
 
 @dataclass
@@ -138,7 +148,7 @@ class AgentPerformanceTracker:
         # Log initialization without exposing API key
         self.logger.info(
             self.secure_logger.format_log(
-                "AgentPerformanceTracker initialized with base URL: %s, TTL: %.1f hours",
+                "AgentPerformanceTracker initialized with base URL: %s, Sliding TTL: %.1f hours",
                 self.base_url, self.session_ttl_hours
             )
         )
@@ -209,7 +219,7 @@ class AgentPerformanceTracker:
         self.logger.info(f"Session TTL updated to {ttl_hours} hours")
     
     def get_session_stats(self) -> Dict[str, Any]:
-        """Get current session cache statistics"""
+        """Get current session cache statistics with sliding TTL info"""
         with self._cache_lock:
             total_sessions = len(self._session_cache)
             expired_count = sum(
@@ -217,14 +227,84 @@ class AgentPerformanceTracker:
                 if session.is_expired(self.session_ttl_hours)
             )
             
+            # Calculate average time since last access
+            now = datetime.now()
+            if total_sessions > 0:
+                total_idle_time = sum(
+                    (now - session.last_access_time).total_seconds() / 3600
+                    for session in self._session_cache.values()
+                )
+                avg_idle_hours = total_idle_time / total_sessions
+                
+                # Find session with longest idle time
+                longest_idle = max(
+                    (now - session.last_access_time).total_seconds() / 3600
+                    for session in self._session_cache.values()
+                ) if total_sessions > 0 else 0.0
+                
+                # Find session with shortest idle time
+                shortest_idle = min(
+                    (now - session.last_access_time).total_seconds() / 3600
+                    for session in self._session_cache.values()
+                ) if total_sessions > 0 else 0.0
+            else:
+                avg_idle_hours = 0.0
+                longest_idle = 0.0
+                shortest_idle = 0.0
+            
             return {
                 'total_cached_sessions': total_sessions,
                 'expired_sessions_pending_cleanup': expired_count,
                 'active_sessions': total_sessions - expired_count,
                 'ttl_hours': self.session_ttl_hours,
-                'cleanup_interval_minutes': self.cleanup_interval_minutes
+                'cleanup_interval_minutes': self.cleanup_interval_minutes,
+                'sliding_ttl_enabled': True,
+                'avg_idle_time_hours': round(avg_idle_hours, 2),
+                'longest_idle_time_hours': round(longest_idle, 2),
+                'shortest_idle_time_hours': round(shortest_idle, 2)
             }
     
+    def touch_session(self, session_id: str) -> bool:
+        """Touch a session to reset its TTL timer (sliding TTL)"""
+        with self._cache_lock:
+            if session_id in self._session_cache:
+                session_info = self._session_cache[session_id]
+                session_info.touch()
+                self.logger.debug(f"Session {session_id} TTL timer reset (sliding TTL)")
+                return True
+            else:
+                self.logger.warning(f"Cannot touch session {session_id}: not found in cache")
+                return False
+    
+    def is_session_active(self, session_id: str) -> bool:
+        """Check if a session is active (not expired)"""
+        with self._cache_lock:
+            if session_id in self._session_cache:
+                session_info = self._session_cache[session_id]
+                is_active = not session_info.is_expired(self.session_ttl_hours)
+                if is_active:
+                    # Touch session on access (sliding TTL)
+                    session_info.touch()
+                    self.logger.debug(f"Session {session_id} checked and TTL reset")
+                return is_active
+            return False
+    
+    def get_session_ttl_remaining(self, session_id: str) -> Optional[float]:
+        """Get remaining TTL for a session in hours"""
+        with self._cache_lock:
+            if session_id in self._session_cache:
+                session_info = self._session_cache[session_id]
+                # Touch session on access (sliding TTL)
+                session_info.touch()
+                
+                expiry_time = session_info.last_access_time + timedelta(hours=self.session_ttl_hours)
+                remaining = expiry_time - datetime.now()
+                remaining_hours = remaining.total_seconds() / 3600
+                
+                self.logger.debug(f"Session {session_id} TTL remaining: {remaining_hours:.2f} hours")
+                return max(0.0, remaining_hours)
+            return None
+
     def _make_request(self, method: str, endpoint: str, data: Optional[Dict] = None) -> APIResponse:
         """Make HTTP request with secure handling"""
         url = urljoin(self.base_url, endpoint)
@@ -397,7 +477,7 @@ class AgentPerformanceTracker:
                         user_feedback: Optional[str] = None,
                         message_count: Optional[int] = None,
                         metadata: Optional[Dict[str, Any]] = None) -> bool:
-        """End a conversation with session validation"""
+        """End a conversation with session validation and sliding TTL"""
         # Check if session exists in cache
         session_info = None
         agent_id = None
@@ -406,6 +486,11 @@ class AgentPerformanceTracker:
         with self._cache_lock:
             if session_id in self._session_cache:
                 session_info = self._session_cache[session_id]
+                
+                # Update last access time (sliding TTL)
+                session_info.touch()
+                self.logger.debug(f"Session {session_id} accessed - TTL timer reset")
+                
                 agent_id = session_info.agent_id
                 start_time = session_info.start_time
                 # Remove from cache as conversation is ending
@@ -470,7 +555,7 @@ class AgentPerformanceTracker:
     
     def record_failed_session(self, session_id: str, error_message: str,
                              metadata: Optional[Dict[str, Any]] = None) -> bool:
-        """Record a failed conversation session"""
+        """Record a failed conversation session with sliding TTL support"""
         # Check if session exists in cache
         session_info = None
         agent_id = None
@@ -479,6 +564,11 @@ class AgentPerformanceTracker:
         with self._cache_lock:
             if session_id in self._session_cache:
                 session_info = self._session_cache[session_id]
+                
+                # Update last access time (sliding TTL)
+                session_info.touch()
+                self.logger.debug(f"Failed session {session_id} accessed - TTL timer reset")
+                
                 agent_id = session_info.agent_id
                 start_time = session_info.start_time
                 # Remove from cache as conversation is ending
