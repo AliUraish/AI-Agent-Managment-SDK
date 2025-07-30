@@ -65,6 +65,22 @@ from .AgentPerform import (
     QueuedEvent
 )
 
+# Import security add-on components (optional)
+try:
+    from .security import (
+        SecurityWrapper,
+        SecurityManager,
+        SecurityFlags,
+        SecurityMetricEvent,
+        TamperDetectionEvent,
+        UnclosedSessionInfo,
+        create_secure_performance_tracker,
+        create_secure_operations_tracker
+    )
+    _SECURITY_AVAILABLE = True
+except ImportError:
+    _SECURITY_AVAILABLE = False
+
 __version__ = "1.2.1"
 __all__ = [
     # Agent Operations
@@ -90,6 +106,19 @@ __all__ = [
     "SecureLogger",
     "SecureAPIClient"
 ]
+
+# Add security exports if available
+if _SECURITY_AVAILABLE:
+    __all__.extend([
+        "SecurityWrapper",
+        "SecurityManager", 
+        "SecurityFlags",
+        "SecurityMetricEvent",
+        "TamperDetectionEvent",
+        "UnclosedSessionInfo",
+        "create_secure_performance_tracker",
+        "create_secure_operations_tracker"
+    ])
 
 # Note: Session tracking is now handled entirely by the backend.
 # The SDK no longer maintains local session state for lighter memory usage. 
