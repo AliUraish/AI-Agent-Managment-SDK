@@ -59,8 +59,10 @@ from .AgentPerform import (
     ConversationQuality,
     ConversationStartData,
     ConversationEndData,
-    PerformanceMetricsQuery,
-    SessionInfo
+    FailedSessionData,
+    SessionRetrievalQuery,
+    SessionInfo,
+    QueuedEvent
 )
 
 __version__ = "1.2.1"
@@ -78,6 +80,7 @@ __all__ = [
     "FailedSessionData",
     "SessionRetrievalQuery",
     "SessionInfo",
+    "QueuedEvent",
     "ConversationQuality",
     
     # API Response
