@@ -131,15 +131,16 @@ def detect_pii(text: str, enable_advanced: bool = True) -> bool:
         # Email addresses
         r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
         
-        # Phone numbers (US and international formats)
-        r'\b(?:\+?1[-.\s]?)?\(?[0-9]{3}\)?[-.\s]?[0-9]{3}[-.\s]?[0-9]{4}\b',
-        r'\b(?:\+?[1-9]\d{0,3}[-.\s]?)?(?:\([0-9]{1,4}\)[-.\s]?)?[0-9]{1,4}[-.\s]?[0-9]{1,4}[-.\s]?[0-9]{1,9}\b',
+        # Phone numbers (more specific US and international formats)
+        r'\b(?:\+?1[-.\s]?)?\(?[2-9][0-9]{2}\)?[-.\s]?[2-9][0-9]{2}[-.\s]?[0-9]{4}\b',
+        r'\b(?:\+[1-9]\d{0,3}[-.\s]?)?(?:\([0-9]{3,4}\)[-.\s]?)?[0-9]{3,4}[-.\s]?[0-9]{3,4}[-.\s]?[0-9]{3,4}\b',
         
-        # Social Security Numbers
-        r'\b\d{3}-?\d{2}-?\d{4}\b',
+        # Social Security Numbers (must be 9 digits in XXX-XX-XXXX or XXXXXXXXX format)
+        r'\b\d{3}-\d{2}-\d{4}\b',
+        r'\b(?<!\d)\d{9}(?!\d)\b',
         
-        # IP addresses (IPv4)
-        r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b',
+        # IP addresses (IPv4 - more strict validation)
+        r'\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b',
     ]
     
     # Check basic patterns
@@ -1268,6 +1269,10 @@ def create_secure_performance_tracker(base_url: str, api_key: Optional[str] = No
                                      enable_security: bool = True,
                                      enable_tracing: bool = True,
                                      otlp_endpoint: Optional[str] = None,
+                                     verbose_security_logs: bool = False,
+                                     enable_advanced_pii: bool = True,
+                                     batch_unclosed_sessions: bool = True,
+                                     max_unclosed_batch_size: int = 100,
                                      client_id: Optional[str] = None,
                                      **tracker_kwargs) -> SecurityWrapper:
     """
@@ -1279,6 +1284,10 @@ def create_secure_performance_tracker(base_url: str, api_key: Optional[str] = No
         enable_security: Whether to enable security features
         enable_tracing: Whether to enable OpenTelemetry tracing
         otlp_endpoint: OTLP collector endpoint for traces
+        verbose_security_logs: Enable verbose logging for security events
+        enable_advanced_pii: Enable advanced PII detection (performance impact)
+        batch_unclosed_sessions: Whether to batch unclosed session reports
+        max_unclosed_batch_size: Maximum number of unclosed sessions to report at once
         client_id: Unique client identifier for security tracking
         **tracker_kwargs: Additional arguments for AgentPerformanceTracker
     
@@ -1293,6 +1302,10 @@ def create_secure_performance_tracker(base_url: str, api_key: Optional[str] = No
         enable_security=enable_security,
         enable_tracing=enable_tracing,
         otlp_endpoint=otlp_endpoint,
+        verbose_security_logs=verbose_security_logs,
+        enable_advanced_pii=enable_advanced_pii,
+        batch_unclosed_sessions=batch_unclosed_sessions,
+        max_unclosed_batch_size=max_unclosed_batch_size,
         client_id=client_id
     )
 
@@ -1300,6 +1313,10 @@ def create_secure_operations_tracker(base_url: str, api_key: Optional[str] = Non
                                     enable_security: bool = True,
                                     enable_tracing: bool = True,
                                     otlp_endpoint: Optional[str] = None,
+                                    verbose_security_logs: bool = False,
+                                    enable_advanced_pii: bool = True,
+                                    batch_unclosed_sessions: bool = True,
+                                    max_unclosed_batch_size: int = 100,
                                     client_id: Optional[str] = None,
                                     **tracker_kwargs) -> SecurityWrapper:
     """
@@ -1311,6 +1328,10 @@ def create_secure_operations_tracker(base_url: str, api_key: Optional[str] = Non
         enable_security: Whether to enable security features
         enable_tracing: Whether to enable OpenTelemetry tracing
         otlp_endpoint: OTLP collector endpoint for traces
+        verbose_security_logs: Enable verbose logging for security events
+        enable_advanced_pii: Enable advanced PII detection (performance impact)
+        batch_unclosed_sessions: Whether to batch unclosed session reports
+        max_unclosed_batch_size: Maximum number of unclosed sessions to report at once
         client_id: Unique client identifier for security tracking
         **tracker_kwargs: Additional arguments for AgentOperationsTracker
     
@@ -1325,6 +1346,10 @@ def create_secure_operations_tracker(base_url: str, api_key: Optional[str] = Non
         enable_security=enable_security,
         enable_tracing=enable_tracing,
         otlp_endpoint=otlp_endpoint,
+        verbose_security_logs=verbose_security_logs,
+        enable_advanced_pii=enable_advanced_pii,
+        batch_unclosed_sessions=batch_unclosed_sessions,
+        max_unclosed_batch_size=max_unclosed_batch_size,
         client_id=client_id
     )
 
