@@ -96,7 +96,8 @@ try:
         PHIDetector,
         GDPRDetector,
         create_compliance_tracker,
-        create_compliance_operations_tracker
+        create_compliance_operations_tracker,
+        create_smart_compliance_tracker
     )
     _COMPLIANCE_AVAILABLE = True
 except ImportError:
@@ -156,7 +157,8 @@ if _COMPLIANCE_AVAILABLE:
         "PHIDetector",
         "GDPRDetector",
         "create_compliance_tracker",
-        "create_compliance_operations_tracker"
+        "create_compliance_operations_tracker",
+        "create_smart_compliance_tracker"
     ])
 
 # Note: Session tracking is now handled entirely by the backend.
