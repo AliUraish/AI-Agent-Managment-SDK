@@ -84,6 +84,24 @@ try:
 except ImportError:
     _SECURITY_AVAILABLE = False
 
+# Import compliance add-on components (optional)
+try:
+    from .compliance import (
+        ComplianceWrapper,
+        ComplianceManager,
+        ComplianceFlags,
+        PolicyViolation,
+        UserAcknowledgment,
+        ComplianceAuditEntry,
+        PHIDetector,
+        GDPRDetector,
+        create_compliance_tracker,
+        create_compliance_operations_tracker
+    )
+    _COMPLIANCE_AVAILABLE = True
+except ImportError:
+    _COMPLIANCE_AVAILABLE = False
+
 __version__ = "1.2.1"
 __all__ = [
     # Agent Operations
@@ -124,6 +142,21 @@ if _SECURITY_AVAILABLE:
         "scan_metadata_for_pii",
         "create_secure_performance_tracker",
         "create_secure_operations_tracker"
+    ])
+
+# Add compliance exports if available
+if _COMPLIANCE_AVAILABLE:
+    __all__.extend([
+        "ComplianceWrapper",
+        "ComplianceManager",
+        "ComplianceFlags",
+        "PolicyViolation",
+        "UserAcknowledgment",
+        "ComplianceAuditEntry",
+        "PHIDetector",
+        "GDPRDetector",
+        "create_compliance_tracker",
+        "create_compliance_operations_tracker"
     ])
 
 # Note: Session tracking is now handled entirely by the backend.
