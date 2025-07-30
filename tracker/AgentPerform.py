@@ -44,11 +44,13 @@ class ConversationQuality(Enum):
 
 @dataclass
 class SessionInfo:
-    """Lightweight session information for validation"""
+    """Lightweight session information for quick validation (hybrid model)"""
     agent_id: str
     start_time: datetime
+    run_id: str  # Unique identifier for this conversation run
     user_id: Optional[str] = None
     last_access_time: Optional[datetime] = None  # For sliding TTL
+    is_ended: bool = False  # Track if conversation has ended locally
     
     def __post_init__(self):
         """Initialize last_access_time if not provided"""
@@ -63,41 +65,60 @@ class SessionInfo:
     def touch(self):
         """Update last access time (sliding TTL)"""
         self.last_access_time = datetime.now()
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for API calls"""
+        return {
+            'agent_id': self.agent_id,
+            'start_time': self.start_time.isoformat(),
+            'run_id': self.run_id,
+            'user_id': self.user_id,
+            'last_access_time': self.last_access_time.isoformat() if self.last_access_time else None,
+            'is_ended': self.is_ended
+        }
 
 
 @dataclass
 class ConversationStartData:
-    """Data structure for conversation start"""
-    session_id: str
+    """Data for starting a conversation with hybrid tracking"""
     agent_id: str
-    start_time: str
+    session_id: str
+    run_id: str
     user_id: Optional[str] = None
+    start_time: Optional[str] = None
+    context: Optional[Dict[str, Any]] = None  # For session resumption
     metadata: Optional[Dict[str, Any]] = None
-
 
 @dataclass
 class ConversationEndData:
-    """Data structure for conversation end"""
-    session_id: str
+    """Data for ending a conversation with hybrid tracking"""
     agent_id: str
-    start_time: str
-    end_time: str
-    duration_seconds: float
-    status: str  # "completed" or "failed"
-    quality_score: Optional[int] = None
+    session_id: str
+    run_id: str
+    end_time: Optional[str] = None
+    duration_seconds: Optional[int] = None
+    quality_score: Optional[Union[int, str]] = None
     user_feedback: Optional[str] = None
-    error_message: Optional[str] = None
     message_count: Optional[int] = None
     metadata: Optional[Dict[str, Any]] = None
 
+@dataclass
+class FailedSessionData:
+    """Data for recording failed sessions with hybrid tracking"""
+    agent_id: str
+    session_id: str
+    run_id: str
+    error_message: str
+    failure_time: Optional[str] = None
+    duration_seconds: Optional[int] = None
+    metadata: Optional[Dict[str, Any]] = None
 
 @dataclass
-class PerformanceMetricsQuery:
-    """Data structure for performance metrics queries"""
-    agent_id: Optional[str] = None
-    start_date: Optional[str] = None
-    end_date: Optional[str] = None
-    metric_type: Optional[str] = None  # "success_rate", "response_time", "quality", "failures"
+class SessionRetrievalQuery:
+    """Query parameters for session retrieval from backend"""
+    session_id: str
+    include_context: bool = True
+    include_history: bool = False
 
 
 class AgentPerformanceTracker:
@@ -111,23 +132,25 @@ class AgentPerformanceTracker:
     Now includes lightweight session tracking with TTL-based cleanup.
     """
     
-    def __init__(self, 
-                 base_url: str,
-                 api_key: Optional[str] = None,
-                 timeout: int = 30,
-                 max_retries: int = 3,
-                 retry_delay: float = 1.0,
-                 enable_async: bool = False,
+    def __init__(self, base_url: str, api_key: Optional[str] = None,
                  session_ttl_hours: float = 10.0,
                  cleanup_interval_minutes: int = 30,
+                 backend_ttl_hours: float = 20.0,  # Backend persistence TTL
                  logger: Optional[logging.Logger] = None):
-        """Initialize the Agent Performance Tracker"""
+        """
+        Initialize Agent Performance Tracker with hybrid session management
+        
+        Args:
+            base_url: API base URL
+            api_key: API authentication key
+            session_ttl_hours: Local cache TTL (default: 10 hours, sliding)
+            cleanup_interval_minutes: Cache cleanup interval (default: 30 minutes)
+            backend_ttl_hours: Backend persistence TTL (default: 20 hours)
+            logger: Optional logger instance
+        """
         self.base_url = base_url.rstrip('/')
-        self.timeout = timeout
-        self.max_retries = max_retries
-        self.retry_delay = retry_delay
-        self.enable_async = enable_async
         self.session_ttl_hours = session_ttl_hours
+        self.backend_ttl_hours = backend_ttl_hours
         self.cleanup_interval_minutes = cleanup_interval_minutes
         
         # Setup secure logging
@@ -191,27 +214,34 @@ class AgentPerformanceTracker:
         self._start_cleanup_timer()
     
     def _notify_backend_session_expired(self, session_id: str, session_info: SessionInfo):
-        """Notify backend about expired session"""
+        """Notify backend about session expiry from local cache (hybrid model)"""
         try:
-            data = {
+            # Check if session is also expired in backend (20 hours)
+            backend_expiry = session_info.start_time + timedelta(hours=self.backend_ttl_hours)
+            backend_expired = datetime.now() > backend_expiry
+            
+            expiry_data = {
                 'session_id': session_id,
                 'agent_id': session_info.agent_id,
-                'start_time': session_info.start_time.isoformat(),
-                'end_time': datetime.now().isoformat(),
-                'status': 'expired',
-                'duration_seconds': (datetime.now() - session_info.start_time).total_seconds(),
-                'expiry_reason': 'ttl_timeout'
+                'run_id': session_info.run_id,
+                'local_expiry_time': datetime.now().isoformat(),
+                'local_ttl_hours': self.session_ttl_hours,
+                'backend_ttl_hours': self.backend_ttl_hours,
+                'backend_expired': backend_expired,
+                'session_duration_hours': (datetime.now() - session_info.start_time).total_seconds() / 3600,
+                'last_access_time': session_info.last_access_time.isoformat() if session_info.last_access_time else None,
+                'was_ended': session_info.is_ended
             }
             
-            response = self._make_request('POST', '/conversations/expired', data)
+            response = self._make_request("POST", "/conversations/local-expired", expiry_data)
             
             if response.success:
-                self.logger.debug(f"Notified backend about expired session: {session_id}")
+                self.logger.info(f"Notified backend about local expiry of session {session_id}")
             else:
-                self.logger.warning(f"Failed to notify backend about expired session {session_id}: {response.error}")
+                self.logger.warning(f"Failed to notify backend about session expiry: {response.message}")
                 
         except Exception as e:
-            self.logger.error(f"Error notifying backend about expired session {session_id}: {e}")
+            self.logger.error(f"Error notifying backend about session {session_id} expiry: {e}")
     
     def set_session_ttl(self, ttl_hours: float):
         """Update the session TTL"""
@@ -219,12 +249,17 @@ class AgentPerformanceTracker:
         self.logger.info(f"Session TTL updated to {ttl_hours} hours")
     
     def get_session_stats(self) -> Dict[str, Any]:
-        """Get current session cache statistics with sliding TTL info"""
+        """Get current session cache statistics with hybrid model information"""
         with self._cache_lock:
             total_sessions = len(self._session_cache)
             expired_count = sum(
                 1 for session in self._session_cache.values() 
                 if session.is_expired(self.session_ttl_hours)
+            )
+            
+            ended_count = sum(
+                1 for session in self._session_cache.values()
+                if session.is_ended
             )
             
             # Calculate average time since last access
@@ -247,18 +282,29 @@ class AgentPerformanceTracker:
                     (now - session.last_access_time).total_seconds() / 3600
                     for session in self._session_cache.values()
                 ) if total_sessions > 0 else 0.0
+                
+                # Sessions that would be expired in backend (20 hours)
+                backend_expired_count = sum(
+                    1 for session in self._session_cache.values()
+                    if (now - session.start_time).total_seconds() / 3600 > self.backend_ttl_hours
+                )
             else:
                 avg_idle_hours = 0.0
                 longest_idle = 0.0
                 shortest_idle = 0.0
+                backend_expired_count = 0
             
             return {
                 'total_cached_sessions': total_sessions,
                 'expired_sessions_pending_cleanup': expired_count,
-                'active_sessions': total_sessions - expired_count,
-                'ttl_hours': self.session_ttl_hours,
+                'active_sessions': total_sessions - expired_count - ended_count,
+                'ended_sessions': ended_count,
+                'local_ttl_hours': self.session_ttl_hours,
+                'backend_ttl_hours': self.backend_ttl_hours,
                 'cleanup_interval_minutes': self.cleanup_interval_minutes,
+                'hybrid_model_enabled': True,
                 'sliding_ttl_enabled': True,
+                'backend_expired_sessions': backend_expired_count,
                 'avg_idle_time_hours': round(avg_idle_hours, 2),
                 'longest_idle_time_hours': round(longest_idle, 2),
                 'shortest_idle_time_hours': round(shortest_idle, 2)
@@ -277,16 +323,43 @@ class AgentPerformanceTracker:
                 return False
     
     def is_session_active(self, session_id: str) -> bool:
-        """Check if a session is active (not expired)"""
-        with self._cache_lock:
-            if session_id in self._session_cache:
-                session_info = self._session_cache[session_id]
-                is_active = not session_info.is_expired(self.session_ttl_hours)
-                if is_active:
-                    # Touch session on access (sliding TTL)
-                    session_info.touch()
-                    self.logger.debug(f"Session {session_id} checked and TTL reset")
-                return is_active
+        """Check if a session is active with hybrid cache/backend fallback"""
+        # Use hybrid cache/backend fallback to get session info
+        session_info = self._get_session_with_fallback(session_id)
+        
+        if session_info:
+            # Session exists (either from cache or backend)
+            if session_info.is_ended:
+                self.logger.debug(f"Session {session_id} has already ended")
+                return False
+            
+            # Check if session is still within local TTL
+            is_active = not session_info.is_expired(self.session_ttl_hours)
+            if is_active:
+                # Touch session on access (sliding TTL)
+                session_info.touch()
+                self.logger.debug(f"Session {session_id} is active - TTL reset")
+            else:
+                self.logger.debug(f"Session {session_id} expired in local cache")
+                
+                # Remove from local cache but check backend TTL
+                with self._cache_lock:
+                    if session_id in self._session_cache:
+                        del self._session_cache[session_id]
+                
+                # Check if still within backend TTL (20 hours from start)
+                backend_expiry = session_info.start_time + timedelta(hours=self.backend_ttl_hours)
+                if datetime.now() < backend_expiry:
+                    self.logger.info(f"Session {session_id} expired locally but still valid in backend")
+                    is_active = True
+                else:
+                    self.logger.info(f"Session {session_id} expired in both local cache and backend")
+                    is_active = False
+            
+            return is_active
+        else:
+            # Session not found in cache or backend
+            self.logger.debug(f"Session {session_id} not found")
             return False
     
     def get_session_ttl_remaining(self, session_id: str) -> Optional[float]:
@@ -417,10 +490,11 @@ class AgentPerformanceTracker:
         session_id = self._generate_session_id(agent_id, start_time)
         
         data = asdict(ConversationStartData(
-            session_id=session_id,
             agent_id=agent_id,
-            start_time=start_time.isoformat(),
+            session_id=session_id,
+            run_id=session_id, # Use session_id as run_id for new sessions
             user_id=user_id,
+            start_time=start_time.isoformat(),
             metadata=metadata
         ))
         
@@ -432,6 +506,7 @@ class AgentPerformanceTracker:
                 self._session_cache[session_id] = SessionInfo(
                     agent_id=agent_id,
                     start_time=start_time,
+                    run_id=session_id, # Use session_id as run_id for new sessions
                     user_id=user_id
                 )
             
@@ -448,10 +523,11 @@ class AgentPerformanceTracker:
         session_id = self._generate_session_id(agent_id, start_time)
         
         data = asdict(ConversationStartData(
-            session_id=session_id,
             agent_id=agent_id,
-            start_time=start_time.isoformat(),
+            session_id=session_id,
+            run_id=session_id, # Use session_id as run_id for new sessions
             user_id=user_id,
+            start_time=start_time.isoformat(),
             metadata=metadata
         ))
         
@@ -463,6 +539,7 @@ class AgentPerformanceTracker:
                 self._session_cache[session_id] = SessionInfo(
                     agent_id=agent_id,
                     start_time=start_time,
+                    run_id=session_id, # Use session_id as run_id for new sessions
                     user_id=user_id
                 )
             
@@ -477,40 +554,41 @@ class AgentPerformanceTracker:
                         user_feedback: Optional[str] = None,
                         message_count: Optional[int] = None,
                         metadata: Optional[Dict[str, Any]] = None) -> bool:
-        """End a conversation with session validation and sliding TTL"""
-        # Check if session exists in cache
-        session_info = None
-        agent_id = None
-        start_time = None
+        """End a conversation with hybrid session management and seamless resumption"""
+        # Use hybrid cache/backend fallback to get session info
+        session_info = self._get_session_with_fallback(session_id)
         
-        with self._cache_lock:
-            if session_id in self._session_cache:
-                session_info = self._session_cache[session_id]
-                
-                # Update last access time (sliding TTL)
-                session_info.touch()
-                self.logger.debug(f"Session {session_id} accessed - TTL timer reset")
-                
-                agent_id = session_info.agent_id
-                start_time = session_info.start_time
-                # Remove from cache as conversation is ending
-                del self._session_cache[session_id]
-            else:
-                self.logger.warning(f"Session {session_id} not found in cache. Proceeding to send to backend anyway.")
-                # Try to extract agent_id from session_id format: agent_id_timestamp_random
-                try:
-                    parts = session_id.split('_')
-                    if len(parts) >= 2:
-                        agent_id = parts[0]
-                        timestamp = int(parts[1])
-                        start_time = datetime.fromtimestamp(timestamp)
-                    else:
-                        # Fallback: ask user to provide agent_id
-                        self.logger.error(f"Cannot extract agent_id from session_id format: {session_id}")
-                        return False
-                except (ValueError, IndexError) as e:
-                    self.logger.error(f"Cannot parse session_id {session_id}: {e}")
+        if session_info:
+            agent_id = session_info.agent_id
+            start_time = session_info.start_time
+            run_id = session_info.run_id
+            
+            # Mark session as ended locally
+            session_info.is_ended = True
+            session_info.touch()  # Final access before ending
+            
+            # Remove from cache as conversation is ending
+            with self._cache_lock:
+                if session_id in self._session_cache:
+                    del self._session_cache[session_id]
+                    
+            self.logger.info(f"Session {session_id} found and ending (agent: {agent_id})")
+        else:
+            self.logger.warning(f"Session {session_id} not found in cache or backend. Proceeding with fallback parsing.")
+            # Try to extract agent_id from session_id format: agent_id_timestamp_random
+            try:
+                parts = session_id.split('_')
+                if len(parts) >= 2:
+                    agent_id = parts[0]
+                    timestamp = int(parts[1])
+                    start_time = datetime.fromtimestamp(timestamp)
+                    run_id = session_id  # Use session_id as run_id
+                else:
+                    self.logger.error(f"Cannot extract agent_id from session_id format: {session_id}")
                     return False
+            except (ValueError, IndexError) as e:
+                self.logger.error(f"Cannot parse session_id {session_id}: {e}")
+                return False
         
         end_time = datetime.now()
         
@@ -532,9 +610,9 @@ class AgentPerformanceTracker:
                 quality_value = quality_score.value
         
         data = asdict(ConversationEndData(
-            session_id=session_id,
             agent_id=agent_id,
-            start_time=start_time_iso,
+            session_id=session_id,
+            run_id=run_id,
             end_time=end_time.isoformat(),
             duration_seconds=duration_seconds,
             status="completed",
@@ -555,39 +633,41 @@ class AgentPerformanceTracker:
     
     def record_failed_session(self, session_id: str, error_message: str,
                              metadata: Optional[Dict[str, Any]] = None) -> bool:
-        """Record a failed conversation session with sliding TTL support"""
-        # Check if session exists in cache
-        session_info = None
-        agent_id = None
-        start_time = None
+        """Record a failed conversation session with hybrid session management"""
+        # Use hybrid cache/backend fallback to get session info
+        session_info = self._get_session_with_fallback(session_id)
         
-        with self._cache_lock:
-            if session_id in self._session_cache:
-                session_info = self._session_cache[session_id]
-                
-                # Update last access time (sliding TTL)
-                session_info.touch()
-                self.logger.debug(f"Failed session {session_id} accessed - TTL timer reset")
-                
-                agent_id = session_info.agent_id
-                start_time = session_info.start_time
-                # Remove from cache as conversation is ending
-                del self._session_cache[session_id]
-            else:
-                self.logger.warning(f"Failed session {session_id} not found in cache. Proceeding to send to backend anyway.")
-                # Try to extract agent_id from session_id format
-                try:
-                    parts = session_id.split('_')
-                    if len(parts) >= 2:
-                        agent_id = parts[0]
-                        timestamp = int(parts[1])
-                        start_time = datetime.fromtimestamp(timestamp)
-                    else:
-                        self.logger.error(f"Cannot extract agent_id from session_id format: {session_id}")
-                        return False
-                except (ValueError, IndexError) as e:
-                    self.logger.error(f"Cannot parse session_id {session_id}: {e}")
+        if session_info:
+            agent_id = session_info.agent_id
+            start_time = session_info.start_time
+            run_id = session_info.run_id
+            
+            # Mark session as ended (failed) locally
+            session_info.is_ended = True
+            session_info.touch()  # Final access before ending
+            
+            # Remove from cache as conversation is ending
+            with self._cache_lock:
+                if session_id in self._session_cache:
+                    del self._session_cache[session_id]
+                    
+            self.logger.info(f"Failed session {session_id} found and recording (agent: {agent_id})")
+        else:
+            self.logger.warning(f"Failed session {session_id} not found in cache or backend. Proceeding with fallback parsing.")
+            # Try to extract agent_id from session_id format
+            try:
+                parts = session_id.split('_')
+                if len(parts) >= 2:
+                    agent_id = parts[0]
+                    timestamp = int(parts[1])
+                    start_time = datetime.fromtimestamp(timestamp)
+                    run_id = session_id  # Use session_id as run_id
+                else:
+                    self.logger.error(f"Cannot extract agent_id from session_id format: {session_id}")
                     return False
+            except (ValueError, IndexError) as e:
+                self.logger.error(f"Cannot parse session_id {session_id}: {e}")
+                return False
         
         end_time = datetime.now()
         
@@ -599,14 +679,13 @@ class AgentPerformanceTracker:
             duration_seconds = 0.0
             start_time_iso = end_time.isoformat()
         
-        data = asdict(ConversationEndData(
-            session_id=session_id,
+        data = asdict(FailedSessionData(
             agent_id=agent_id,
-            start_time=start_time_iso,
-            end_time=end_time.isoformat(),
-            duration_seconds=duration_seconds,
-            status="failed",
+            session_id=session_id,
+            run_id=run_id,
             error_message=error_message,
+            failure_time=end_time.isoformat(),
+            duration_seconds=duration_seconds,
             metadata=metadata
         ))
         
@@ -879,6 +958,130 @@ class AgentPerformanceTracker:
             self.logger.error(f"Failed to get active conversations: {response.error}")
             return None
     
+    def _retrieve_session_from_backend(self, session_id: str) -> Optional[SessionInfo]:
+        """Retrieve session information from backend when local cache expires"""
+        try:
+            endpoint = f"/conversations/{session_id}"
+            response = self._make_request("GET", endpoint)
+            
+            if response.success and response.data:
+                session_data = response.data
+                
+                # Validate session data
+                if not self._validate_session_data(session_data):
+                    self.logger.error(f"Invalid session data from backend for {session_id}")
+                    return self._create_fallback_session_info(session_id)
+                
+                # Reconstruct SessionInfo from backend data
+                session_info = SessionInfo(
+                    agent_id=session_data.get('agent_id'),
+                    start_time=datetime.fromisoformat(session_data.get('start_time')),
+                    run_id=session_data.get('run_id', session_id),
+                    user_id=session_data.get('user_id'),
+                    is_ended=session_data.get('is_ended', False)
+                )
+                
+                # Touch the session since we're accessing it
+                session_info.touch()
+                
+                # Add back to local cache for future quick access
+                with self._cache_lock:
+                    self._session_cache[session_id] = session_info
+                
+                self.logger.info(f"Retrieved session {session_id} from backend and restored to cache")
+                return session_info
+            else:
+                self.logger.warning(f"Session {session_id} not found in backend: {response.message}")
+                return self._create_fallback_session_info(session_id)
+                
+        except Exception as e:
+            self._handle_session_error(session_id, "backend_retrieval", e)
+            return self._create_fallback_session_info(session_id)
+    
+    async def _retrieve_session_from_backend_async(self, session_id: str) -> Optional[SessionInfo]:
+        """Retrieve session information from backend when local cache expires (async)"""
+        try:
+            endpoint = f"/conversations/{session_id}"
+            response = await self._make_request_async("GET", endpoint)
+            
+            if response.success and response.data:
+                session_data = response.data
+                
+                # Validate session data
+                if not self._validate_session_data(session_data):
+                    self.logger.error(f"Invalid session data from backend for {session_id}")
+                    return self._create_fallback_session_info(session_id)
+                
+                # Reconstruct SessionInfo from backend data
+                session_info = SessionInfo(
+                    agent_id=session_data.get('agent_id'),
+                    start_time=datetime.fromisoformat(session_data.get('start_time')),
+                    run_id=session_data.get('run_id', session_id),
+                    user_id=session_data.get('user_id'),
+                    is_ended=session_data.get('is_ended', False)
+                )
+                
+                # Touch the session since we're accessing it
+                session_info.touch()
+                
+                # Add back to local cache for future quick access
+                with self._cache_lock:
+                    self._session_cache[session_id] = session_info
+                
+                self.logger.info(f"Retrieved session {session_id} from backend and restored to cache")
+                return session_info
+            else:
+                self.logger.warning(f"Session {session_id} not found in backend: {response.message}")
+                return self._create_fallback_session_info(session_id)
+                
+        except Exception as e:
+            self._handle_session_error(session_id, "async_backend_retrieval", e)
+            return self._create_fallback_session_info(session_id)
+    
+    def _get_session_with_fallback(self, session_id: str) -> Optional[SessionInfo]:
+        """Get session with hybrid cache/backend fallback logic"""
+        # First, check local cache
+        with self._cache_lock:
+            if session_id in self._session_cache:
+                session_info = self._session_cache[session_id]
+                
+                # Check if expired locally
+                if session_info.is_expired(self.session_ttl_hours):
+                    self.logger.info(f"Session {session_id} expired in local cache, checking backend...")
+                    # Remove from local cache
+                    del self._session_cache[session_id]
+                else:
+                    # Still valid in local cache, touch and return
+                    session_info.touch()
+                    self.logger.debug(f"Session {session_id} found in cache - TTL reset")
+                    return session_info
+        
+        # Session not in cache or expired locally, try backend
+        self.logger.info(f"Session {session_id} not in local cache, attempting backend retrieval...")
+        return self._retrieve_session_from_backend(session_id)
+    
+    async def _get_session_with_fallback_async(self, session_id: str) -> Optional[SessionInfo]:
+        """Get session with hybrid cache/backend fallback logic (async)"""
+        # First, check local cache
+        with self._cache_lock:
+            if session_id in self._session_cache:
+                session_info = self._session_cache[session_id]
+                
+                # Check if expired locally
+                if session_info.is_expired(self.session_ttl_hours):
+                    self.logger.info(f"Session {session_id} expired in local cache, checking backend...")
+                    # Remove from local cache
+                    del self._session_cache[session_id]
+                else:
+                    # Still valid in local cache, touch and return
+                    session_info.touch()
+                    self.logger.debug(f"Session {session_id} found in cache - TTL reset")
+                    return session_info
+        
+        # Session not in cache or expired locally, try backend
+        self.logger.info(f"Session {session_id} not in local cache, attempting backend retrieval...")
+        return await self._retrieve_session_from_backend_async(session_id)
+
     async def close_async(self):
         """Close resources asynchronously"""
         # Stop cleanup timer
@@ -923,3 +1126,173 @@ class AgentPerformanceTracker:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit"""
         await self.close_async()
+
+    def resume_conversation(self, session_id: str, agent_id: str, 
+                           user_id: Optional[str] = None,
+                           context: Optional[Dict[str, Any]] = None,
+                           metadata: Optional[Dict[str, Any]] = None) -> bool:
+        """Resume a conversation that was retrieved from backend"""
+        try:
+            start_time = datetime.now()
+            
+            # Create session info for resumed conversation
+            session_info = SessionInfo(
+                agent_id=agent_id,
+                start_time=start_time,
+                run_id=session_id,  # Use existing session_id as run_id
+                user_id=user_id,
+                is_ended=False
+            )
+            
+            # Add to local cache
+            with self._cache_lock:
+                self._session_cache[session_id] = session_info
+            
+            # Send resumption to backend
+            data = asdict(ConversationStartData(
+                agent_id=agent_id,
+                session_id=session_id,
+                run_id=session_id,
+                user_id=user_id,
+                start_time=start_time.isoformat(),
+                context=context,  # Include context for resumption
+                metadata=metadata
+            ))
+            
+            response = self._make_request("POST", "/conversations/resume", data)
+            
+            if response.success:
+                self.logger.info(f"Successfully resumed conversation {session_id} for agent {agent_id}")
+                return True
+            else:
+                self.logger.error(f"Failed to resume conversation: {response.message}")
+                # Remove from cache if backend failed
+                with self._cache_lock:
+                    if session_id in self._session_cache:
+                        del self._session_cache[session_id]
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Error resuming conversation {session_id}: {e}")
+            return False
+
+    async def resume_conversation_async(self, session_id: str, agent_id: str, 
+                                       user_id: Optional[str] = None,
+                                       context: Optional[Dict[str, Any]] = None,
+                                       metadata: Optional[Dict[str, Any]] = None) -> bool:
+        """Resume a conversation that was retrieved from backend (async)"""
+        try:
+            start_time = datetime.now()
+            
+            # Create session info for resumed conversation
+            session_info = SessionInfo(
+                agent_id=agent_id,
+                start_time=start_time,
+                run_id=session_id,  # Use existing session_id as run_id
+                user_id=user_id,
+                is_ended=False
+            )
+            
+            # Add to local cache
+            with self._cache_lock:
+                self._session_cache[session_id] = session_info
+            
+            # Send resumption to backend
+            data = asdict(ConversationStartData(
+                agent_id=agent_id,
+                session_id=session_id,
+                run_id=session_id,
+                user_id=user_id,
+                start_time=start_time.isoformat(),
+                context=context,  # Include context for resumption
+                metadata=metadata
+            ))
+            
+            response = await self._make_request_async("POST", "/conversations/resume", data)
+            
+            if response.success:
+                self.logger.info(f"Successfully resumed conversation {session_id} for agent {agent_id}")
+                return True
+            else:
+                self.logger.error(f"Failed to resume conversation: {response.message}")
+                # Remove from cache if backend failed
+                with self._cache_lock:
+                    if session_id in self._session_cache:
+                        del self._session_cache[session_id]
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Error resuming conversation {session_id}: {e}")
+            return False
+
+    def _handle_session_error(self, session_id: str, operation: str, error: Exception) -> bool:
+        """Handle session-related errors with appropriate fallbacks"""
+        error_msg = str(error)
+        
+        if "404" in error_msg or "not found" in error_msg.lower():
+            self.logger.warning(f"Session {session_id} not found during {operation} - may have expired in backend")
+            # Remove from local cache if exists
+            with self._cache_lock:
+                if session_id in self._session_cache:
+                    del self._session_cache[session_id]
+            return False
+            
+        elif "timeout" in error_msg.lower() or "connection" in error_msg.lower():
+            self.logger.error(f"Network error during {operation} for session {session_id}: {error}")
+            # Keep local cache but log the issue
+            return False
+            
+        elif "403" in error_msg or "unauthorized" in error_msg.lower():
+            self.logger.error(f"Authorization error during {operation} for session {session_id}: {error}")
+            return False
+            
+        else:
+            self.logger.error(f"Unexpected error during {operation} for session {session_id}: {error}")
+            return False
+    
+    def _validate_session_data(self, session_data: Dict[str, Any]) -> bool:
+        """Validate session data retrieved from backend"""
+        required_fields = ['agent_id', 'start_time']
+        
+        for field in required_fields:
+            if field not in session_data or session_data[field] is None:
+                self.logger.error(f"Missing required field '{field}' in session data")
+                return False
+        
+        # Validate datetime format
+        try:
+            datetime.fromisoformat(session_data['start_time'])
+        except (ValueError, TypeError) as e:
+            self.logger.error(f"Invalid start_time format in session data: {e}")
+            return False
+            
+        return True
+    
+    def _create_fallback_session_info(self, session_id: str) -> Optional[SessionInfo]:
+        """Create fallback session info when backend retrieval fails"""
+        try:
+            # Try to extract info from session_id format: agent_id_timestamp_random
+            parts = session_id.split('_')
+            if len(parts) >= 2:
+                agent_id = parts[0]
+                timestamp = int(parts[1])
+                start_time = datetime.fromtimestamp(timestamp)
+                
+                # Create minimal session info
+                session_info = SessionInfo(
+                    agent_id=agent_id,
+                    start_time=start_time,
+                    run_id=session_id,
+                    user_id=None,
+                    is_ended=False
+                )
+                
+                self.logger.info(f"Created fallback session info for {session_id} (agent: {agent_id})")
+                return session_info
+            else:
+                self.logger.error(f"Cannot create fallback for session_id format: {session_id}")
+                return None
+                
+        except (ValueError, IndexError) as e:
+            self.logger.error(f"Cannot parse session_id {session_id} for fallback: {e}")
+            return None

@@ -1,5 +1,154 @@
 # Changelog
 
+## [1.2.1] - 2025-01-30
+
+### Added - Hybrid Session Management System
+
+#### 🔄 Revolutionary Hybrid Model
+- ✅ **Dual TTL System**: 10-hour local sliding TTL + 20-hour backend persistence
+- ✅ **Seamless Resumption**: Automatic session recovery across SDK crashes/restarts
+- ✅ **Backend Fallback**: When local cache expires, automatically retrieve from backend
+- ✅ **Crash Resilience**: Sessions survive SDK shutdowns through backend persistence
+- ✅ **Single Source of Truth**: Backend maintains authoritative session state
+
+#### 🏗️ Session Lifecycle Architecture
+```
+1. start_conversation() → Creates in local cache + backend
+2. Active usage → Sliding TTL resets on each access (local)
+3. Local TTL expires → Automatic backend retrieval if within 20h
+4. Seamless resumption → Context preserved, no interruption
+5. Backend TTL expires → Session permanently expired (20h)
+```
+
+#### 🔧 Enhanced SessionInfo (Lightweight Cache)
+```python
+@dataclass
+class SessionInfo:
+    agent_id: str
+    start_time: datetime
+    run_id: str              # 🔑 New: Unique conversation identifier
+    user_id: Optional[str]
+    last_access_time: datetime  # For sliding TTL
+    is_ended: bool = False   # 🔑 New: Track completion status
+```
+
+#### 🛠️ New Hybrid Methods
+- 🔧 `resume_conversation(session_id, agent_id, context)` - Explicit resumption with context
+- 🔧 `resume_conversation_async()` - Async version of resumption
+- 🔍 `_get_session_with_fallback()` - Hybrid cache/backend retrieval
+- 🔍 `_retrieve_session_from_backend()` - Backend session recovery
+- 🛡️ `_handle_session_error()` - Enhanced error handling with fallbacks
+- ✅ `_validate_session_data()` - Backend data validation
+- 🔄 `_create_fallback_session_info()` - Graceful degradation
+
+#### 📊 New Data Structures
+```python
+@dataclass
+class ConversationStartData:
+    agent_id: str
+    session_id: str
+    run_id: str
+    context: Optional[Dict] = None  # 🔑 For session resumption
+
+@dataclass
+class FailedSessionData:
+    agent_id: str
+    session_id: str 
+    run_id: str
+    error_message: str
+    failure_time: str
+    
+@dataclass
+class SessionRetrievalQuery:
+    session_id: str
+    include_context: bool = True
+    include_history: bool = False
+```
+
+#### 🎯 Enhanced Session Statistics
+```python
+stats = perf_tracker.get_session_stats()
+# Returns:
+{
+    'total_cached_sessions': 3,
+    'active_sessions': 2,
+    'ended_sessions': 1,
+    'local_ttl_hours': 10.0,
+    'backend_ttl_hours': 20.0,       # 🔑 New
+    'hybrid_model_enabled': True,    # 🔑 New
+    'backend_expired_sessions': 0,   # 🔑 New
+    'avg_idle_time_hours': 2.1,
+    'longest_idle_time_hours': 5.3
+}
+```
+
+#### 🌐 New API Endpoints
+- `GET /conversations/{session_id}` - Retrieve session from backend
+- `POST /conversations/resume` - Resume conversation with context
+- `POST /conversations/local-expired` - Notify about local cache expiry
+
+#### 🔄 Updated Method Behavior
+**Seamless Backend Integration**:
+- `end_conversation()` - Now uses hybrid fallback for session lookup
+- `record_failed_session()` - Hybrid fallback + enhanced error handling
+- `is_session_active()` - Checks local cache → backend → dual TTL validation
+- `get_session_ttl_remaining()` - Considers both local and backend TTL
+
+#### 💡 Usage Examples
+
+**Basic Hybrid Session**:
+```python
+# Start conversation (stored locally + backend)
+session_id = perf_tracker.start_conversation("agent_001", user_id="user_123")
+
+# SDK crashes/restarts here...
+
+# Later: Check session (automatically retrieves from backend)
+is_active = perf_tracker.is_session_active(session_id)  # ✅ True (seamlessly resumed)
+```
+
+**Explicit Resumption with Context**:
+```python
+# Resume with context after local cache expires
+success = perf_tracker.resume_conversation(
+    session_id=old_session_id,
+    agent_id="agent_001", 
+    user_id="user_123",
+    context={"previous_topic": "billing", "step": 3},
+    metadata={"resumption_reason": "cache_expiry"}
+)
+```
+
+**Crash Recovery Simulation**:
+```python
+# Clear local cache (simulate crash)
+with perf_tracker._cache_lock:
+    perf_tracker._session_cache.clear()
+
+# Session access still works (retrieved from backend)
+active = perf_tracker.is_session_active(session_id)  # ✅ True
+```
+
+#### 🎯 Benefits
+- 🚀 **Zero-Downtime Recovery**: Sessions survive crashes and restarts
+- 💾 **Memory Efficient**: Local cache only stores lightweight session data
+- 🔄 **Automatic Fallback**: No manual intervention required for session recovery
+- 📊 **Rich Analytics**: Comprehensive session health monitoring
+- ⚡ **Performance Optimized**: Local cache for speed, backend for persistence
+- 🛡️ **Error Resilient**: Graceful degradation with multiple fallback strategies
+
+#### 🔧 Configuration
+```python
+perf_tracker = AgentPerformanceTracker(
+    base_url="https://api.example.com",
+    session_ttl_hours=10.0,        # Local cache sliding TTL
+    backend_ttl_hours=20.0,        # Backend persistence TTL
+    cleanup_interval_minutes=30    # Cache cleanup frequency
+)
+```
+
+---
+
 ## [1.3.0] - 2025-01-30
 
 ### Added - Sliding TTL (Smart Session Lifetime Management)

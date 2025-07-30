@@ -1,260 +1,279 @@
 #!/usr/bin/env python3
 """
-Example usage of the separated Agent Operations and Performance Trackers
+AI Agent SDK Usage Examples - Hybrid Session Management
+
+This script demonstrates the hybrid session management capabilities where the SDK
+maintains lightweight local cache with backend persistence and seamless resumption.
 """
 
 import asyncio
 import logging
 import os
+import time
+from datetime import datetime
 from tracker import (
     AgentOperationsTracker, 
-    AgentPerformanceTracker,
-    AgentStatus, 
-    ConversationQuality
+    AgentPerformanceTracker, 
+    ConversationQuality,
+    AgentStatus
 )
 
-# Setup logging with appropriate level
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Setup logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Get API key from environment variable (more secure than hardcoding)
-API_KEY = os.getenv('AGENT_TRACKER_API_KEY')
-if not API_KEY:
-    logger.warning("No API key found in environment variables. Some features may be limited.")
-
-def operations_example():
-    """Example of Agent Operations Tracker usage"""
-    logger.info("=== Agent Operations Tracker Example ===")
+def hybrid_session_demo():
+    """Demonstrate hybrid session management with backend fallback"""
+    logger.info("=== Hybrid Session Management Demo ===")
     
-    # Initialize operations tracker
-    ops_tracker = AgentOperationsTracker(
+    # Initialize with hybrid configuration
+    perf_tracker = AgentPerformanceTracker(
         base_url="https://your-backend-api.com",
-        api_key=API_KEY,
-        timeout=30,
-        max_retries=3,
+        api_key=os.getenv('AGENT_TRACKER_API_KEY'),
+        session_ttl_hours=10.0,      # Local cache TTL (sliding)
+        backend_ttl_hours=20.0,      # Backend persistence TTL  
+        cleanup_interval_minutes=30,
         logger=logger
     )
     
     try:
-        # Register an agent
-        success = ops_tracker.register_agent(
-            agent_id="agent_001",
-            sdk_version="1.0.0",
-            metadata={
-                "type": "customer_support",
-                "region": "us-east",
-                "environment": os.getenv('ENVIRONMENT', 'development')
-            }
+        logger.info("Creating conversation sessions...")
+        
+        # Start multiple conversations
+        session1 = perf_tracker.start_conversation(
+            agent_id="support_agent_001",
+            user_id="customer_123",
+            metadata={"channel": "web_chat", "priority": "high"}
         )
         
-        if success:
-            logger.info("Agent registered successfully")
+        session2 = perf_tracker.start_conversation(
+            agent_id="sales_agent_002", 
+            user_id="lead_456",
+            metadata={"channel": "phone", "campaign": "summer_sale"}
+        )
+        
+        logger.info(f"Session 1: {session1}")
+        logger.info(f"Session 2: {session2}")
+        
+        # Check initial session stats
+        stats = perf_tracker.get_session_stats()
+        logger.info(f"Initial session stats: {stats}")
+        
+        # Simulate active conversation (touches sessions)
+        logger.info("\n--- Simulating Active Conversations ---")
+        for i in range(3):
+            time.sleep(2)
             
-            # Update agent status
-            ops_tracker.update_agent_status("agent_001", AgentStatus.ACTIVE)
+            # Check session status (automatically touches sessions)
+            active1 = perf_tracker.is_session_active(session1)
+            active2 = perf_tracker.is_session_active(session2)
             
-            # Log some activities
-            ops_tracker.log_activity(
-                agent_id="agent_001",
-                action="status_change",
-                details={"from": "offline", "to": "active"}
+            logger.info(f"Interval {i+1}: Session1 active: {active1}, Session2 active: {active2}")
+            
+            # Get TTL remaining
+            ttl1 = perf_tracker.get_session_ttl_remaining(session1)
+            ttl2 = perf_tracker.get_session_ttl_remaining(session2)
+            
+            logger.info(f"  TTL remaining - Session1: {ttl1:.3f}h, Session2: {ttl2:.3f}h")
+        
+        # Demonstrate session resumption after "crash"
+        logger.info("\n--- Simulating SDK Restart/Crash ---")
+        logger.info("Clearing local cache to simulate restart...")
+        
+        # Clear local cache to simulate crash/restart
+        with perf_tracker._cache_lock:
+            perf_tracker._session_cache.clear()
+        
+        logger.info("Local cache cleared. Now trying to access sessions...")
+        
+        # Try to access sessions - should retrieve from backend
+        active1_after = perf_tracker.is_session_active(session1)
+        active2_after = perf_tracker.is_session_active(session2)
+        
+        logger.info(f"After cache clear - Session1 active: {active1_after}, Session2 active: {active2_after}")
+        
+        if active1_after:
+            logger.info("✅ Session1 successfully retrieved from backend!")
+        if active2_after:
+            logger.info("✅ Session2 successfully retrieved from backend!")
+        
+        # End conversations with different outcomes
+        logger.info("\n--- Ending Conversations ---")
+        
+        # Successful conversation end
+        if session1:
+            success = perf_tracker.end_conversation(
+                session_id=session1,
+                quality_score=ConversationQuality.EXCELLENT,
+                user_feedback="Very helpful support!",
+                message_count=15,
+                metadata={"resolution": "solved", "satisfaction": 5}
             )
-            
-            ops_tracker.log_activity(
-                agent_id="agent_001", 
-                action="initialization_complete",
-                details={"modules_loaded": 5, "startup_time": 2.3},
-                duration=2.3
+            logger.info(f"Session1 ended successfully: {success}")
+        
+        # Failed conversation
+        if session2:
+            success = perf_tracker.record_failed_session(
+                session_id=session2,
+                error_message="Customer disconnected",
+                metadata={"failure_reason": "timeout", "duration_before_failure": 300}
             )
+            logger.info(f"Session2 recorded as failed: {success}")
         
-        # Get active agents
-        active_agents = ops_tracker.get_active_agents()
-        if active_agents:
-            logger.info("Retrieved active agents information")
+        # Final session stats
+        final_stats = perf_tracker.get_session_stats()
+        logger.info(f"Final session stats: {final_stats}")
         
-        # Get recent activity
-        activity = ops_tracker.get_recent_activity(limit=10, agent_id="agent_001")
-        if activity:
-            logger.info("Retrieved recent activity logs")
-        
-        # Get operations overview
-        overview = ops_tracker.get_operations_overview()
-        if overview:
-            logger.info("Operations overview retrieved")
-    
     except Exception as e:
-        logger.error("Error during operations tracking: %s", str(e))
+        logger.error(f"Error in hybrid session demo: {e}")
     finally:
-        ops_tracker.close()
+        perf_tracker.close()
+        logger.info("Hybrid session demo completed")
 
-def performance_example():
-    """Example of Agent Performance Tracker usage"""
-    logger.info("=== Agent Performance Tracker Example ===")
+def session_resumption_demo():
+    """Demonstrate explicit session resumption with context"""
+    logger.info("\n=== Session Resumption Demo ===")
     
-    # Initialize performance tracker
     perf_tracker = AgentPerformanceTracker(
         base_url="https://your-backend-api.com",
-        api_key=API_KEY,
-        timeout=30,
-        max_retries=3,
-        logger=logger
+        api_key=os.getenv('AGENT_TRACKER_API_KEY'),
+        session_ttl_hours=0.01,      # Very short local TTL for demo
+        backend_ttl_hours=20.0
     )
     
     try:
         # Start a conversation
         session_id = perf_tracker.start_conversation(
-            agent_id="agent_001",
-            user_id="user_123",
-            metadata={
-                "channel": "web",
-                "priority": "high",
-                "session_type": "support"
-            }
+            agent_id="advisor_agent_003",
+            user_id="client_789",
+            metadata={"type": "financial_consultation"}
         )
         
-        if session_id:
-            logger.info("Conversation started with ID: %s", session_id)
+        logger.info(f"Started consultation session: {session_id}")
+        
+        # Wait for local TTL to expire
+        logger.info("Waiting for local TTL to expire...")
+        time.sleep(60)  # Wait longer than local TTL
+        
+        # Try to access - should retrieve from backend
+        logger.info("Checking session status after local TTL expiry...")
+        still_active = perf_tracker.is_session_active(session_id)
+        logger.info(f"Session still active: {still_active}")
+        
+        if still_active:
+            logger.info("✅ Session seamlessly resumed from backend!")
             
-            # Simulate conversation end with quality score
-            perf_tracker.end_conversation(
+            # Resume explicitly with context
+            context = {
+                "previous_topic": "investment_portfolio",
+                "user_preferences": {"risk_tolerance": "moderate"},
+                "conversation_stage": "recommendation_phase"
+            }
+            
+            resumed = perf_tracker.resume_conversation(
+                session_id=session_id,
+                agent_id="advisor_agent_003",
+                user_id="client_789",
+                context=context,
+                metadata={"resumption_reason": "session_recovery"}
+            )
+            
+            logger.info(f"Explicit resumption with context: {resumed}")
+            
+            # Continue and end the conversation
+            success = perf_tracker.end_conversation(
                 session_id=session_id,
                 quality_score=ConversationQuality.GOOD,
-                user_feedback="Very helpful agent!",
-                message_count=15,
-                metadata={
-                    "resolution": "solved",
-                    "category": "technical"
-                }
+                user_feedback="Good advice, will consider the recommendations",
+                message_count=28,
+                metadata={"outcome": "recommendations_provided"}
             )
-            
-            logger.info("Conversation completed successfully")
+            logger.info(f"Resumed conversation ended: {success}")
         
-        # Start another conversation that fails
-        failed_session = perf_tracker.start_conversation(
-            agent_id="agent_001",
-            user_id="user_456"
-        )
-        
-        if failed_session:
-            # Record a failed session
-            perf_tracker.record_failed_session(
-                session_id=failed_session,
-                error_message="Connection timeout",
-                metadata={
-                    "error_code": "TIMEOUT_001",
-                    "retry_count": 3
-                }
-            )
-        
-        # Get performance metrics
-        success_rates = perf_tracker.get_success_rates(agent_id="agent_001")
-        if success_rates:
-            logger.info("Success rates retrieved")
-        
-        response_times = perf_tracker.get_response_times(agent_id="agent_001")
-        if response_times:
-            logger.info("Response times retrieved")
-        
-        quality_metrics = perf_tracker.get_conversation_quality(agent_id="agent_001")
-        if quality_metrics:
-            logger.info("Quality metrics retrieved")
-        
-        failed_sessions = perf_tracker.get_failed_sessions(agent_id="agent_001")
-        if failed_sessions:
-            logger.info("Failed sessions data retrieved")
-        
-        # Get performance overview
-        perf_overview = perf_tracker.get_performance_overview(agent_id="agent_001")
-        if perf_overview:
-            logger.info("Performance overview retrieved")
-        
-        # Check session cache statistics
-        session_stats = perf_tracker.get_session_stats()
-        logger.info("Session cache stats: %s", session_stats)
-    
     except Exception as e:
-        logger.error("Error during performance tracking: %s", str(e))
+        logger.error(f"Error in resumption demo: {e}")
     finally:
         perf_tracker.close()
 
-async def async_example():
-    """Example asynchronous usage of both trackers"""
-    logger.info("=== Async Trackers Example ===")
-    
-    # Initialize both trackers with async support
-    ops_tracker = AgentOperationsTracker(
-        base_url="https://your-backend-api.com",
-        api_key=API_KEY,
-        enable_async=True,
-        logger=logger
-    )
+async def async_hybrid_demo():
+    """Demonstrate async hybrid session management"""
+    logger.info("\n=== Async Hybrid Session Demo ===")
     
     perf_tracker = AgentPerformanceTracker(
         base_url="https://your-backend-api.com",
-        api_key=API_KEY,
-        enable_async=True,
-        logger=logger
+        api_key=os.getenv('AGENT_TRACKER_API_KEY'),
+        session_ttl_hours=10.0,
+        backend_ttl_hours=20.0
     )
     
     try:
-        # Operations tracking
-        await ops_tracker.register_agent_async(
-            agent_id="agent_002",
-            sdk_version="1.0.0",
-            metadata={"type": "chatbot", "environment": "production"}
-        )
-        
-        await ops_tracker.update_agent_status_async("agent_002", AgentStatus.ACTIVE)
-        
-        await ops_tracker.log_activity_async(
-            agent_id="agent_002",
-            action="async_initialization",
-            details={"async_mode": True, "startup_time": 1.8}
-        )
-        
-        # Performance tracking
+        # Start async conversation
         session_id = await perf_tracker.start_conversation_async(
-            agent_id="agent_002",
-            user_id="user_789",
-            metadata={"session_type": "automated"}
+            agent_id="chatbot_v2",
+            user_id="web_user_001",
+            metadata={"platform": "website", "entry_point": "help_button"}
         )
         
+        logger.info(f"Async session started: {session_id}")
+        
+        # Simulate async operations
+        await asyncio.sleep(1)
+        
+        # Check session with async fallback
+        session_info = await perf_tracker._get_session_with_fallback_async(session_id)
+        if session_info:
+            logger.info(f"Async session retrieved: {session_info.agent_id}")
+        
+        # Resume with async
         if session_id:
-            # End conversation with performance data
-            perf_tracker.end_conversation(
+            resumed = await perf_tracker.resume_conversation_async(
                 session_id=session_id,
-                quality_score=ConversationQuality.EXCELLENT,
-                message_count=8
+                agent_id="chatbot_v2",
+                user_id="web_user_001",
+                context={"interaction_count": 5},
+                metadata={"async_resumption": True}
             )
+            logger.info(f"Async resumption: {resumed}")
         
-        # Get async metrics
-        active_agents = await ops_tracker.get_active_agents_async()
-        success_rates = await perf_tracker.get_success_rates_async(agent_id="agent_002")
+        # End async conversation
+        if session_id:
+            ended = await perf_tracker.end_conversation_async(
+                session_id=session_id,
+                quality_score=ConversationQuality.FAIR,
+                message_count=12,
+                metadata={"completion_type": "async"}
+            )
+            logger.info(f"Async conversation ended: {ended}")
         
-        if active_agents and success_rates:
-            logger.info("Async operations and performance data retrieved")
-    
     except Exception as e:
-        logger.error("Error during async tracking: %s", str(e))
+        logger.error(f"Error in async demo: {e}")
     finally:
-        await ops_tracker.close_async()
         await perf_tracker.close_async()
 
 def main():
-    """Run all examples"""
-    # Verify API key is available
-    if not API_KEY:
-        logger.warning("Please set AGENT_TRACKER_API_KEY environment variable")
+    """Run all demos"""
+    if not os.getenv('AGENT_TRACKER_API_KEY'):
+        logger.warning("No API key set, but demo will still show local functionality")
     
-    # Run synchronous examples
-    operations_example()
-    performance_example()
-    
-    # Run async example
-    asyncio.run(async_example())
+    try:
+        # Run sync demos
+        hybrid_session_demo()
+        session_resumption_demo()
+        
+        # Run async demo
+        asyncio.run(async_hybrid_demo())
+        
+        logger.info("\n🎉 All hybrid session management demos completed!")
+        logger.info("\nKey Benefits Demonstrated:")
+        logger.info("- ✅ Lightweight local caching with sliding TTL")
+        logger.info("- ✅ Automatic backend fallback and retrieval")
+        logger.info("- ✅ Seamless session resumption after crashes")
+        logger.info("- ✅ Context preservation across restarts")
+        logger.info("- ✅ Dual TTL system (10h local + 20h backend)")
+        logger.info("- ✅ Rich session analytics and monitoring")
+        
+    except Exception as e:
+        logger.error(f"Error in main demo: {e}")
 
 if __name__ == "__main__":
     main() 
