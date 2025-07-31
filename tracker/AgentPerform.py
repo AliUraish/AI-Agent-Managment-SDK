@@ -140,6 +140,46 @@ class SessionRetrievalQuery:
     include_context: bool = True
     include_history: bool = False
 
+@dataclass
+class PerformanceMetrics:
+    """Performance metrics tracking for agent operations"""
+    total_sessions: int = 0
+    successful_sessions: int = 0
+    failed_sessions: int = 0
+    total_response_time_ms: float = 0.0
+    quality_scores: List[int] = None
+    agent_failure_counts: Dict[str, int] = None
+    last_updated: Optional[datetime] = None
+    
+    def __post_init__(self):
+        if self.quality_scores is None:
+            self.quality_scores = []
+        if self.agent_failure_counts is None:
+            self.agent_failure_counts = {}
+        if self.last_updated is None:
+            self.last_updated = datetime.now()
+    
+    @property
+    def success_rate(self) -> float:
+        """Calculate success rate percentage"""
+        if self.total_sessions == 0:
+            return 0.0
+        return (self.successful_sessions / self.total_sessions) * 100.0
+    
+    @property
+    def average_response_time_ms(self) -> float:
+        """Calculate average response time"""
+        if self.successful_sessions == 0:
+            return 0.0
+        return self.total_response_time_ms / self.successful_sessions
+    
+    @property
+    def average_quality_score(self) -> float:
+        """Calculate average quality score"""
+        if not self.quality_scores:
+            return 0.0
+        return sum(self.quality_scores) / len(self.quality_scores)
+
 
 class AgentPerformanceTracker:
     """
@@ -153,6 +193,7 @@ class AgentPerformanceTracker:
     """
     
     def __init__(self, base_url: str, api_key: Optional[str] = None,
+                 client_id: Optional[str] = None,
                  session_ttl_hours: float = 10.0,
                  cleanup_interval_minutes: int = 30,
                  backend_ttl_hours: float = 20.0,  # Backend persistence TTL
@@ -166,6 +207,7 @@ class AgentPerformanceTracker:
         Args:
             base_url: API base URL
             api_key: API authentication key
+            client_id: Client identifier for SDK instance
             session_ttl_hours: Local cache TTL (default: 10 hours, sliding)
             cleanup_interval_minutes: Cache cleanup interval (default: 30 minutes)
             backend_ttl_hours: Backend persistence TTL (default: 20 hours)
@@ -175,6 +217,7 @@ class AgentPerformanceTracker:
             logger: Optional logger instance
         """
         self.base_url = base_url.rstrip('/')
+        self.client_id = client_id or f"sdk_client_{int(datetime.now().timestamp())}"
         self.session_ttl_hours = session_ttl_hours
         self.backend_ttl_hours = backend_ttl_hours
         self.cleanup_interval_minutes = cleanup_interval_minutes
@@ -186,8 +229,12 @@ class AgentPerformanceTracker:
         self.logger = logger or logging.getLogger(__name__)
         self.secure_logger = SecureLogger()
         
-        # Initialize secure API client
+        # Initialize API client
         self.api_client = SecureAPIClient(base_url, api_key)
+        
+        # Performance metrics tracking
+        self._performance_metrics = PerformanceMetrics()
+        self._metrics_lock = threading.RLock()
         
         # LRU Session cache for lightweight session tracking
         self._session_cache: OrderedDict[str, SessionInfo] = OrderedDict()
@@ -577,7 +624,7 @@ class AgentPerformanceTracker:
             if response.success:
                 self.logger.info(f"Notified backend about local expiry of session {session_id}")
             else:
-                self.logger.warning(f"Failed to notify backend about session expiry: {response.message}")
+                self.logger.warning(f"Failed to notify backend about session expiry: {response.error}")
                 
         except Exception as e:
             self.logger.error(f"Error notifying backend about session {session_id} expiry: {e}")
@@ -801,7 +848,7 @@ class AgentPerformanceTracker:
                 if response.success:
                     self.logger.info(f"Sent batch expiry notification for {len(batch)} sessions")
                 else:
-                    self.logger.warning(f"Failed to send batch expiry notification: {response.message}")
+                    self.logger.warning(f"Failed to send batch expiry notification: {response.error}")
                     self._queue_event_offline('batch_expired', batch_data)
             else:
                 self._queue_event_offline('batch_expired', batch_data)
@@ -823,7 +870,7 @@ class AgentPerformanceTracker:
                     self.logger.info("Backend connection restored")
             else:
                 # Check if it's a connectivity issue
-                if any(error in response.message.lower() for error in ['timeout', 'connection', 'unreachable', 'network']):
+                if any(error in response.error.lower() for error in ['timeout', 'connection', 'unreachable', 'network']):
                     if self._backend_available:
                         self._backend_available = False
                         self.logger.warning("Backend appears to be unreachable")
@@ -859,7 +906,7 @@ class AgentPerformanceTracker:
                     self.logger.info("Backend connection restored (async)")
             else:
                 # Check if it's a connectivity issue
-                if any(error in response.message.lower() for error in ['timeout', 'connection', 'unreachable', 'network']):
+                if any(error in response.error.lower() for error in ['timeout', 'connection', 'unreachable', 'network']):
                     if self._backend_available:
                         self._backend_available = False
                         self.logger.warning("Backend appears to be unreachable (async)")
@@ -1024,7 +1071,7 @@ class AgentPerformanceTracker:
                 self.logger.info(f"Successfully ended conversation {session_id}")
                 return True
             else:
-                self.logger.warning(f"Failed to end conversation: {response.message}")
+                self.logger.warning(f"Failed to end conversation: {response.error}")
                 self._queue_event_offline('end', data)
                 return False
         else:
@@ -1032,69 +1079,105 @@ class AgentPerformanceTracker:
             self._queue_event_offline('end', data)
             return True  # Return True since we queued it
     
-    def record_failed_session(self, session_id: str, error_message: str,
+    def record_failed_session(self, 
+                             session_id: Optional[str] = None,
+                             agent_id: Optional[str] = None,
+                             error_message: Optional[str] = None,
+                             failure_reason: Optional[str] = None,
+                             error_details: Optional[Dict[str, Any]] = None,
                              metadata: Optional[Dict[str, Any]] = None) -> bool:
-        """Record a failed conversation session with hybrid session management"""
-        # Use hybrid cache/backend fallback to get session info (this is an activity)
-        session_info = self._get_session_with_fallback(session_id, is_activity=True)
+        """
+        Record a failed conversation session with hybrid session management
         
-        if session_info:
-            agent_id = session_info.agent_id
-            start_time = session_info.start_time
-            run_id = session_info.run_id
+        Args:
+            session_id: Session ID (if available)
+            agent_id: Agent ID (fallback if session_id not available)
+            error_message: Error message (legacy parameter name)
+            failure_reason: Failure reason (new parameter name)
+            error_details: Additional error details
+            metadata: Additional metadata
             
-            # Mark session as ended (failed) locally
-            session_info.is_ended = True
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        # Handle parameter flexibility for backward compatibility
+        actual_error_message = failure_reason or error_message or "Unknown error"
+        actual_metadata = metadata or error_details or {}
+        
+        if session_id:
+            # Use hybrid cache/backend fallback to get session info (this is an activity)
+            session_info = self._get_session_with_fallback(session_id, is_activity=True)
             
-            # Remove from cache as conversation is ending
-            self._remove_session_lru(session_id)
-                    
-            self.logger.info(f"Failed session {session_id} found and recording (agent: {agent_id})")
+            if session_info:
+                actual_agent_id = session_info.agent_id
+                start_time = session_info.start_time
+                run_id = session_info.run_id
+                
+                # Mark session as ended and remove from cache
+                session_info.is_ended = True
+                self._remove_session_lru(session_id)
+            else:
+                # Session not found, try to extract from session_id format or use fallback
+                actual_agent_id = agent_id or self._extract_agent_id_from_session(session_id)
+                start_time = datetime.now()
+                run_id = "unknown"
+        elif agent_id:
+            # Legacy mode: agent_id provided directly
+            actual_agent_id = agent_id
+            session_id = f"failed_{actual_agent_id}_{int(datetime.now().timestamp())}"
+            start_time = datetime.now()
+            run_id = "legacy"
         else:
-            self.logger.warning(f"Failed session {session_id} not found in cache or backend. Proceeding with fallback parsing.")
-            # Try to extract agent_id from session_id format
-            try:
-                parts = session_id.split('_')
-                if len(parts) >= 2:
-                    agent_id = parts[0]
-                    timestamp = int(parts[1])
-                    start_time = datetime.fromtimestamp(timestamp)
-                    run_id = session_id  # Use session_id as run_id
-                else:
-                    self.logger.error(f"Cannot extract agent_id from session_id format: {session_id}")
-                    return False
-            except (ValueError, IndexError) as e:
-                self.logger.error(f"Cannot parse session_id {session_id}: {e}")
-                return False
+            self.logger.error("Either session_id or agent_id must be provided")
+            return False
+
+        # Prepare failed session data
+        failed_session_data = {
+            "session_id": session_id,
+            "agent_id": actual_agent_id,
+            "timestamp": datetime.now().isoformat(),
+            "client_id": self.client_id,
+            "failure_reason": actual_error_message,
+            "error_details": actual_metadata,
+            "start_time": start_time.isoformat() if isinstance(start_time, datetime) else start_time,
+            "run_id": run_id
+        }
         
-        end_time = datetime.now()
-        
-        # Calculate duration
-        if start_time:
-            duration_seconds = (end_time - start_time).total_seconds()
-            start_time_iso = start_time.isoformat()
-        else:
-            duration_seconds = 0.0
-            start_time_iso = end_time.isoformat()
-        
-        data = asdict(FailedSessionData(
-            agent_id=agent_id,
-            session_id=session_id,
-            run_id=run_id,
-            error_message=error_message,
-            failure_time=end_time.isoformat(),
-            duration_seconds=duration_seconds,
-            metadata=metadata
-        ))
-        
-        response = self._make_request('POST', '/conversations/end', data)
+        # Send to backend
+        response = self._make_request('POST', '/conversations/failed-session', failed_session_data)
         
         if response.success:
-            self.logger.info(f"Failed conversation {session_id} recorded")
+            self.logger.info(f"Failed session recorded for agent {actual_agent_id}: {actual_error_message}")
+            
+            # Update internal metrics
+            with self._metrics_lock:
+                self._performance_metrics.failed_sessions += 1
+                if actual_agent_id not in self._performance_metrics.agent_failure_counts:
+                    self._performance_metrics.agent_failure_counts[actual_agent_id] = 0
+                self._performance_metrics.agent_failure_counts[actual_agent_id] += 1
+                
             return True
         else:
-            self.logger.error(f"Failed to record failed session {session_id}: {response.error}")
+            self.logger.error(f"Failed to record failed session: {response.error}")
+            self._queue_event_offline('record_failed_session', failed_session_data)
             return False
+    
+    def _extract_agent_id_from_session(self, session_id: str) -> str:
+        """Extract agent_id from session_id format (if follows convention)"""
+        try:
+            # Try to extract from format like "session_agentid_timestamp" 
+            parts = session_id.split('_')
+            if len(parts) >= 3 and parts[0] == 'session':
+                return parts[1]
+            # Try other common formats
+            if 'agent' in session_id:
+                import re
+                match = re.search(r'agent[_-]?([a-zA-Z0-9]+)', session_id)
+                if match:
+                    return match.group(1)
+        except Exception:
+            pass
+        return "unknown"
     
     def get_success_rates(self, agent_id: Optional[str] = None, 
                          start_date: Optional[str] = None, 
@@ -1389,7 +1472,7 @@ class AgentPerformanceTracker:
                 self.logger.info(f"Retrieved session {session_id} from backend and restored to cache")
                 return session_info
             else:
-                self.logger.warning(f"Session {session_id} not found in backend: {response.message}")
+                self.logger.warning(f"Session {session_id} not found in backend: {response.error}")
                 return self._create_fallback_session_info(session_id)
                 
         except Exception as e:
@@ -1429,7 +1512,7 @@ class AgentPerformanceTracker:
                 self.logger.info(f"Retrieved session {session_id} from backend and restored to cache")
                 return session_info
             else:
-                self.logger.warning(f"Session {session_id} not found in backend: {response.message}")
+                self.logger.warning(f"Session {session_id} not found in backend: {response.error}")
                 return self._create_fallback_session_info(session_id)
                 
         except Exception as e:
@@ -1625,7 +1708,7 @@ class AgentPerformanceTracker:
                 self.logger.info(f"Successfully resumed conversation {session_id} for agent {agent_id}")
                 return True
             else:
-                self.logger.error(f"Failed to resume conversation: {response.message}")
+                self.logger.error(f"Failed to resume conversation: {response.error}")
                 # Remove from cache if backend failed
                 with self._cache_lock:
                     if session_id in self._session_cache:
@@ -1674,7 +1757,7 @@ class AgentPerformanceTracker:
                 self.logger.info(f"Successfully resumed conversation {session_id} for agent {agent_id}")
                 return True
             else:
-                self.logger.error(f"Failed to resume conversation: {response.message}")
+                self.logger.error(f"Failed to resume conversation: {response.error}")
                 # Remove from cache if backend failed
                 with self._cache_lock:
                     if session_id in self._session_cache:

@@ -12,6 +12,16 @@ import aiohttp
 from urllib.parse import urljoin
 import re
 
+
+@dataclass
+class APIResponse:
+    """Standard response structure from backend API"""
+    success: bool
+    data: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    status_code: Optional[int] = None
+
+
 class SecureLogger:
     """Secure logger that masks sensitive information"""
     
@@ -95,6 +105,110 @@ class SecureAPIClient:
                 pass
             self._async_session = None
 
+    def make_request(self, method: str, endpoint: str, data: Optional[Dict] = None) -> APIResponse:
+        """Public method for making HTTP requests"""
+        return self._make_request(method, endpoint, data)
+    
+    async def make_request_async(self, method: str, endpoint: str, data: Optional[Dict] = None) -> APIResponse:
+        """Public method for making async HTTP requests"""
+        return await self._make_request_async(method, endpoint, data)
+    
+    def _make_request(self, method: str, endpoint: str, data: Optional[Dict] = None) -> APIResponse:
+        """Make HTTP request with secure handling"""
+        url = urljoin(self.base_url, endpoint)
+        
+        # Mask sensitive data in logs
+        secure_logger = SecureLogger()
+        log_data = secure_logger.mask_sensitive_data(data) if data else None
+        
+        for attempt in range(3):  # Default 3 retries
+            try:
+                session = self.get_session()
+                
+                if method.upper() == 'GET':
+                    response = session.get(url, timeout=30)
+                elif method.upper() == 'POST':
+                    response = session.post(url, json=data, timeout=30)
+                else:
+                    raise ValueError(f"Unsupported HTTP method: {method}")
+                
+                # Parse response
+                if response.status_code < 400:
+                    try:
+                        response_data = response.json() if response.content else {}
+                    except json.JSONDecodeError:
+                        response_data = {'raw_response': response.text}
+                    
+                    return APIResponse(
+                        success=True,
+                        data=response_data,
+                        status_code=response.status_code
+                    )
+                else:
+                    error_msg = f"HTTP {response.status_code}"
+                    return APIResponse(
+                        success=False,
+                        error=error_msg,
+                        status_code=response.status_code
+                    )
+                    
+            except requests.exceptions.RequestException as e:
+                if attempt < 2:  # Retry on failure
+                    time.sleep(1.0 * (2 ** attempt))
+                else:
+                    return APIResponse(
+                        success=False,
+                        error=str(e)
+                    )
+        
+        return APIResponse(success=False, error="Max retries exceeded")
+
+    async def _make_request_async(self, method: str, endpoint: str, data: Optional[Dict] = None) -> APIResponse:
+        """Make async HTTP request with retry logic"""
+        url = urljoin(self.base_url, endpoint)
+        session = await self.get_async_session()
+        
+        for attempt in range(3):  # Default 3 retries
+            try:
+                if method.upper() == 'GET':
+                    async with session.get(url) as response:
+                        response_data = await self._parse_async_response(response)
+                elif method.upper() == 'POST':
+                    async with session.post(url, json=data) as response:
+                        response_data = await self._parse_async_response(response)
+                else:
+                    raise ValueError(f"Unsupported HTTP method: {method}")
+                
+                if response.status < 400:
+                    return APIResponse(
+                        success=True,
+                        data=response_data,
+                        status_code=response.status
+                    )
+                else:
+                    error_msg = f"HTTP {response.status}: {response_data}"
+                    return APIResponse(
+                        success=False,
+                        error=error_msg,
+                        status_code=response.status
+                    )
+                    
+            except aiohttp.ClientError as e:
+                if attempt < 2:
+                    await asyncio.sleep(1.0 * (2 ** attempt))
+                else:
+                    return APIResponse(success=False, error=str(e))
+        
+        return APIResponse(success=False, error="Max retries exceeded")
+    
+    async def _parse_async_response(self, response: aiohttp.ClientResponse) -> Dict[str, Any]:
+        """Parse async response safely"""
+        try:
+            return await response.json()
+        except aiohttp.ContentTypeError:
+            text = await response.text()
+            return {'raw_response': text}
+
 
 class AgentStatus(Enum):
     """Enumeration for different agent statuses"""
@@ -104,15 +218,6 @@ class AgentStatus(Enum):
     ERROR = "error"
     OFFLINE = "offline"
     INITIALIZING = "initializing"
-
-
-@dataclass
-class APIResponse:
-    """Standard response structure from backend API"""
-    success: bool
-    data: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
-    status_code: Optional[int] = None
 
 
 @dataclass
@@ -325,83 +430,87 @@ class AgentOperationsTracker:
             self.logger.error(f"Failed to register agent {agent_id}: {response.error}")
             return False
     
-    def update_agent_status(self, agent_id: str, status: AgentStatus, 
-                           previous_status: Optional[AgentStatus] = None,
+    def update_agent_status(self, agent_id: str, status: Union[AgentStatus, str], 
+                           previous_status: Optional[Union[AgentStatus, str]] = None,
                            metadata: Optional[Dict[str, Any]] = None) -> bool:
         """Update agent status in the backend"""
+        status_value = status.value if isinstance(status, AgentStatus) else status
+        previous_status_value = previous_status.value if isinstance(previous_status, AgentStatus) else previous_status
+        
         data = asdict(AgentStatusData(
             agent_id=agent_id,
-            status=status.value,
+            status=status_value,
             timestamp=datetime.now().isoformat(),
-            previous_status=previous_status.value if previous_status else None,
+            previous_status=previous_status_value,
             metadata=metadata
         ))
         
         response = self._make_request('POST', '/agents/status', data)
         
         if response.success:
-            self.logger.debug(f"Agent {agent_id} status updated to {status.value}")
+            self.logger.debug(f"Agent {agent_id} status updated to {status_value}")
             return True
         else:
             self.logger.error(f"Failed to update agent {agent_id} status: {response.error}")
             return False
     
-    async def update_agent_status_async(self, agent_id: str, status: AgentStatus,
-                                       previous_status: Optional[AgentStatus] = None,
+    async def update_agent_status_async(self, agent_id: str, status: Union[AgentStatus, str],
+                                       previous_status: Optional[Union[AgentStatus, str]] = None,
                                        metadata: Optional[Dict[str, Any]] = None) -> bool:
         """Async version of update_agent_status"""
+        status_value = status.value if isinstance(status, AgentStatus) else status
+        previous_status_value = previous_status.value if isinstance(previous_status, AgentStatus) else previous_status
+        
         data = asdict(AgentStatusData(
             agent_id=agent_id,
-            status=status.value,
+            status=status_value,
             timestamp=datetime.now().isoformat(),
-            previous_status=previous_status.value if previous_status else None,
+            previous_status=previous_status_value,
             metadata=metadata
         ))
         
         response = await self._make_request_async('POST', '/agents/status', data)
         
         if response.success:
-            self.logger.debug(f"Agent {agent_id} status updated to {status.value}")
+            self.logger.debug(f"Agent {agent_id} status updated to {status_value}")
             return True
         else:
             self.logger.error(f"Failed to update agent {agent_id} status: {response.error}")
             return False
     
-    def log_activity(self, agent_id: str, action: str, details: Dict[str, Any],
-                    duration: Optional[float] = None) -> bool:
+    def log_activity(self, agent_id: str, activity_type: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
         """Log agent activity to the backend"""
         data = asdict(ActivityLogData(
             agent_id=agent_id,
-            action=action,
+            action=activity_type,
             timestamp=datetime.now().isoformat(),
-            details=details,
-            duration=duration
+            details=metadata or {},
+            duration=None
         ))
         
         response = self._make_request('POST', '/agents/activity', data)
         
         if response.success:
-            self.logger.debug(f"Activity logged for agent {agent_id}: {action}")
+            self.logger.debug(f"Activity logged for agent {agent_id}: {activity_type}")
             return True
         else:
             self.logger.error(f"Failed to log activity for agent {agent_id}: {response.error}")
             return False
     
-    async def log_activity_async(self, agent_id: str, action: str, details: Dict[str, Any],
-                                duration: Optional[float] = None) -> bool:
+    async def log_activity_async(self, agent_id: str, activity_type: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
         """Async version of log_activity"""
         data = asdict(ActivityLogData(
             agent_id=agent_id,
-            action=action,
+            action=activity_type,
             timestamp=datetime.now().isoformat(),
-            details=details,
-            duration=duration
+            details=metadata or {},
+            duration=None
         ))
         
         response = await self._make_request_async('POST', '/agents/activity', data)
         
         if response.success:
-            self.logger.debug(f"Activity logged for agent {agent_id}: {action}")
+            self.logger.debug(f"Activity logged for agent {agent_id}: {activity_type}")
             return True
         else:
             self.logger.error(f"Failed to log activity for agent {agent_id}: {response.error}")
