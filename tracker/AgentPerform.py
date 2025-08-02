@@ -380,7 +380,9 @@ class AgentPerformanceTracker:
                         'expired': '/conversations/local-expired',
                         'resume': '/conversations/resume',
                         'batch_expired': '/conversations/batch-expired',
-                        'evicted': '/conversations/evicted'
+                        'evicted': '/conversations/evicted',
+                        'message': '/conversations/message',
+                        'history': '/conversations/history'
                     }
                     
                     endpoint = endpoint_map.get(event.event_type)
@@ -476,7 +478,9 @@ class AgentPerformanceTracker:
                         'end': '/conversations/end',
                         'failed': '/conversations/failed',
                         'expired': '/conversations/local-expired',
-                        'resume': '/conversations/resume'
+                        'resume': '/conversations/resume',
+                        'message': '/conversations/message',
+                        'history': '/conversations/history'
                     }
                     
                     endpoint = endpoint_map.get(event.event_type)
@@ -1887,3 +1891,300 @@ class AgentPerformanceTracker:
                 self.logger.debug(f"Session {session_id} activity - TTL reset")
                 return session_info
             return None
+
+    def log_message(self, session_id: str, message_type: str, content: str,
+                   response_time_ms: Optional[int] = None,
+                   tokens_used: Optional[int] = None,
+                   metadata: Optional[Dict[str, Any]] = None) -> bool:
+        """
+        Log an individual message within a conversation
+        
+        Args:
+            session_id: The conversation session ID
+            message_type: Type of message ("user", "agent", "system")
+            content: The message content
+            response_time_ms: Response time in milliseconds (for agent messages)
+            tokens_used: Number of tokens used (for LLM messages)
+            metadata: Additional metadata
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        # Get session info to extract agent_id
+        session_info = self._get_session_with_fallback(session_id, is_activity=True)
+        
+        if session_info:
+            agent_id = session_info.agent_id
+        else:
+            # Try to extract agent_id from session_id format
+            agent_id = self._extract_agent_id_from_session(session_id)
+            self.logger.warning(f"Session {session_id} not found, using extracted agent_id: {agent_id}")
+        
+        # Generate unique message ID
+        message_id = f"{session_id}_{message_type}_{int(datetime.now().timestamp()*1000)}"
+        
+        # Prepare message data
+        message_data = asdict(MessageData(
+            session_id=session_id,
+            agent_id=agent_id,
+            message_id=message_id,
+            timestamp=datetime.now().isoformat(),
+            message_type=message_type,
+            content=content,
+            metadata=metadata,
+            response_time_ms=response_time_ms,
+            tokens_used=tokens_used
+        ))
+        
+        # Send to backend
+        response = self._make_request('POST', '/conversations/message', message_data)
+        
+        if response.success:
+            self.logger.info(f"Message logged for session {session_id} (type: {message_type})")
+            return True
+        else:
+            self.logger.error(f"Failed to log message: {response.error}")
+            # Queue for offline replay
+            self._queue_event_offline('message', message_data)
+            return False
+    
+    async def log_message_async(self, session_id: str, message_type: str, content: str,
+                               response_time_ms: Optional[int] = None,
+                               tokens_used: Optional[int] = None,
+                               metadata: Optional[Dict[str, Any]] = None) -> bool:
+        """Async version of log_message"""
+        # Get session info to extract agent_id
+        session_info = await self._get_session_with_fallback_async(session_id, is_activity=True)
+        
+        if session_info:
+            agent_id = session_info.agent_id
+        else:
+            # Try to extract agent_id from session_id format
+            agent_id = self._extract_agent_id_from_session(session_id)
+            self.logger.warning(f"Session {session_id} not found, using extracted agent_id: {agent_id}")
+        
+        # Generate unique message ID
+        message_id = f"{session_id}_{message_type}_{int(datetime.now().timestamp()*1000)}"
+        
+        # Prepare message data
+        message_data = asdict(MessageData(
+            session_id=session_id,
+            agent_id=agent_id,
+            message_id=message_id,
+            timestamp=datetime.now().isoformat(),
+            message_type=message_type,
+            content=content,
+            metadata=metadata,
+            response_time_ms=response_time_ms,
+            tokens_used=tokens_used
+        ))
+        
+        # Send to backend
+        response = await self._make_request_async('POST', '/conversations/message', message_data)
+        
+        if response.success:
+            self.logger.info(f"Message logged for session {session_id} (type: {message_type})")
+            return True
+        else:
+            self.logger.error(f"Failed to log message: {response.error}")
+            # Queue for offline replay
+            self._queue_event_offline('message', message_data)
+            return False
+    
+    def update_conversation_history(self, session_id: str, messages: List[Dict[str, Any]],
+                                   conversation_summary: Optional[str] = None,
+                                   metadata: Optional[Dict[str, Any]] = None) -> bool:
+        """
+        Update the complete conversation history for a session
+        
+        Args:
+            session_id: The conversation session ID
+            messages: List of message dictionaries with structure:
+                     [{"type": "user", "content": "...", "timestamp": "...", "tokens": 10}, ...]
+            conversation_summary: Optional summary of the conversation
+            metadata: Additional metadata
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        # Get session info to extract agent_id
+        session_info = self._get_session_with_fallback(session_id, is_activity=True)
+        
+        if session_info:
+            agent_id = session_info.agent_id
+            start_time = session_info.start_time.isoformat()
+        else:
+            # Try to extract agent_id from session_id format
+            agent_id = self._extract_agent_id_from_session(session_id)
+            start_time = datetime.now().isoformat()
+            self.logger.warning(f"Session {session_id} not found, using extracted agent_id: {agent_id}")
+        
+        # Calculate totals
+        total_messages = len(messages)
+        total_tokens = sum(msg.get('tokens', 0) for msg in messages if isinstance(msg.get('tokens'), (int, float)))
+        
+        # Prepare conversation history data
+        history_data = asdict(ConversationHistoryData(
+            session_id=session_id,
+            agent_id=agent_id,
+            messages=messages,
+            conversation_summary=conversation_summary,
+            total_messages=total_messages,
+            total_tokens=total_tokens,
+            start_time=start_time,
+            last_update=datetime.now().isoformat(),
+            metadata=metadata
+        ))
+        
+        # Send to backend
+        response = self._make_request('POST', '/conversations/history', history_data)
+        
+        if response.success:
+            self.logger.info(f"Conversation history updated for session {session_id} ({total_messages} messages, {total_tokens} tokens)")
+            return True
+        else:
+            self.logger.error(f"Failed to update conversation history: {response.error}")
+            # Queue for offline replay
+            self._queue_event_offline('history', history_data)
+            return False
+    
+    async def update_conversation_history_async(self, session_id: str, messages: List[Dict[str, Any]],
+                                               conversation_summary: Optional[str] = None,
+                                               metadata: Optional[Dict[str, Any]] = None) -> bool:
+        """Async version of update_conversation_history"""
+        # Get session info to extract agent_id
+        session_info = await self._get_session_with_fallback_async(session_id, is_activity=True)
+        
+        if session_info:
+            agent_id = session_info.agent_id
+            start_time = session_info.start_time.isoformat()
+        else:
+            # Try to extract agent_id from session_id format
+            agent_id = self._extract_agent_id_from_session(session_id)
+            start_time = datetime.now().isoformat()
+            self.logger.warning(f"Session {session_id} not found, using extracted agent_id: {agent_id}")
+        
+        # Calculate totals
+        total_messages = len(messages)
+        total_tokens = sum(msg.get('tokens', 0) for msg in messages if isinstance(msg.get('tokens'), (int, float)))
+        
+        # Prepare conversation history data
+        history_data = asdict(ConversationHistoryData(
+            session_id=session_id,
+            agent_id=agent_id,
+            messages=messages,
+            conversation_summary=conversation_summary,
+            total_messages=total_messages,
+            total_tokens=total_tokens,
+            start_time=start_time,
+            last_update=datetime.now().isoformat(),
+            metadata=metadata
+        ))
+        
+        # Send to backend
+        response = await self._make_request_async('POST', '/conversations/history', history_data)
+        
+        if response.success:
+            self.logger.info(f"Conversation history updated for session {session_id} ({total_messages} messages, {total_tokens} tokens)")
+            return True
+        else:
+            self.logger.error(f"Failed to update conversation history: {response.error}")
+            # Queue for offline replay
+            self._queue_event_offline('history', history_data)
+            return False
+    
+    def get_conversation_history(self, session_id: str, 
+                                include_content: bool = True,
+                                limit: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve conversation history from backend
+        
+        Args:
+            session_id: The conversation session ID
+            include_content: Whether to include message content
+            limit: Maximum number of messages to retrieve
+            
+        Returns:
+            Dict containing conversation history or None if failed
+        """
+        params = {}
+        if not include_content:
+            params['include_content'] = 'false'
+        if limit:
+            params['limit'] = str(limit)
+        
+        query_string = '&'.join([f"{k}={v}" for k, v in params.items()])
+        endpoint = f'/conversations/{session_id}/history'
+        if query_string:
+            endpoint += f'?{query_string}'
+        
+        response = self._make_request('GET', endpoint)
+        
+        if response.success:
+            return response.data
+        else:
+            self.logger.error(f"Failed to get conversation history for {session_id}: {response.error}")
+            return None
+    
+    async def get_conversation_history_async(self, session_id: str, 
+                                           include_content: bool = True,
+                                           limit: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """Async version of get_conversation_history"""
+        params = {}
+        if not include_content:
+            params['include_content'] = 'false'
+        if limit:
+            params['limit'] = str(limit)
+        
+        query_string = '&'.join([f"{k}={v}" for k, v in params.items()])
+        endpoint = f'/conversations/{session_id}/history'
+        if query_string:
+            endpoint += f'?{query_string}'
+        
+        response = await self._make_request_async('GET', endpoint)
+        
+        if response.success:
+            return response.data
+        else:
+            self.logger.error(f"Failed to get conversation history for {session_id}: {response.error}")
+            return None
+    
+    def log_user_message(self, session_id: str, content: str, 
+                        metadata: Optional[Dict[str, Any]] = None) -> bool:
+        """Convenience method to log a user message"""
+        return self.log_message(session_id, "user", content, metadata=metadata)
+    
+    def log_agent_message(self, session_id: str, content: str, 
+                         response_time_ms: Optional[int] = None,
+                         tokens_used: Optional[int] = None,
+                         metadata: Optional[Dict[str, Any]] = None) -> bool:
+        """Convenience method to log an agent message"""
+        return self.log_message(session_id, "agent", content, 
+                               response_time_ms=response_time_ms,
+                               tokens_used=tokens_used, 
+                               metadata=metadata)
+    
+    def log_system_message(self, session_id: str, content: str,
+                          metadata: Optional[Dict[str, Any]] = None) -> bool:
+        """Convenience method to log a system message"""
+        return self.log_message(session_id, "system", content, metadata=metadata)
+    
+    async def log_user_message_async(self, session_id: str, content: str, 
+                                    metadata: Optional[Dict[str, Any]] = None) -> bool:
+        """Async convenience method to log a user message"""
+        return await self.log_message_async(session_id, "user", content, metadata=metadata)
+    
+    async def log_agent_message_async(self, session_id: str, content: str, 
+                                     response_time_ms: Optional[int] = None,
+                                     tokens_used: Optional[int] = None,
+                                     metadata: Optional[Dict[str, Any]] = None) -> bool:
+        """Async convenience method to log an agent message"""
+        return await self.log_message_async(session_id, "agent", content, 
+                                           response_time_ms=response_time_ms,
+                                           tokens_used=tokens_used, 
+                                           metadata=metadata)
+    
+    async def log_system_message_async(self, session_id: str, content: str,
+                                      metadata: Optional[Dict[str, Any]] = None) -> bool:
+        """Async convenience method to log a system message"""
+        return await self.log_message_async(session_id, "system", content, metadata=metadata)
