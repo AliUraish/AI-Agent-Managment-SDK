@@ -62,7 +62,10 @@ from .AgentPerform import (
     FailedSessionData,
     SessionRetrievalQuery,
     SessionInfo,
-    QueuedEvent
+    QueuedEvent,
+    MessageData,
+    ConversationHistoryData,
+    PerformanceMetrics
 )
 
 from .LLMtracker import LLMTracker
@@ -122,6 +125,9 @@ __all__ = [
     "SessionInfo",
     "QueuedEvent",
     "ConversationQuality",
+    "MessageData",
+    "ConversationHistoryData",
+    "PerformanceMetrics",
     
     # LLM Usage Tracking
     "LLMTracker",
