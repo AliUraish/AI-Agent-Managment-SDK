@@ -15,7 +15,15 @@ from urllib.parse import urljoin
 import re
 
 # Import secure components from AgentOper
-from .AgentOper import SecureLogger, SecureAPIClient, APIResponse
+from .AgentOper import (
+    SecureLogger,
+    SecureAPIClient,
+    APIResponse,
+    APIConfig,
+    ValidationError,
+    validate_metadata,
+    to_ms_timestamp
+)
 
 
 @dataclass
@@ -218,12 +226,14 @@ class AgentPerformanceTracker:
     Now includes lightweight session tracking with TTL-based cleanup.
     """
     
-    def __init__(self, base_url: str, api_key: Optional[str] = None,
+    def __init__(self, base_url: Optional[str] = None,
+                 api_key: Optional[str] = None,
                  client_id: Optional[str] = None,
+                 config: Optional[APIConfig] = None,
                  session_ttl_hours: float = 10.0,
                  cleanup_interval_minutes: int = 30,
                  backend_ttl_hours: float = 20.0,  # Backend persistence TTL
-                 max_cache_size: int = 50000,  # Maximum cache size for LRU (increased for scalability)
+                 max_cache_size: int = 50000,  # Maximum cache size for LRU
                  max_offline_queue_size: int = 5000,  # Maximum offline queue size
                  batch_notification_size: int = 50,  # Batch size for expiry notifications
                  logger: Optional[logging.Logger] = None):
@@ -242,8 +252,16 @@ class AgentPerformanceTracker:
             batch_notification_size: Number of notifications to batch together
             logger: Optional logger instance
         """
-        self.base_url = base_url.rstrip('/')
-        self.client_id = client_id or f"sdk_client_{int(datetime.now().timestamp())}"
+        # Initialize API configuration
+        self.api_config = config or APIConfig()
+        if base_url:
+            self.api_config.base_url = base_url.rstrip('/')
+        if api_key:
+            self.api_config.api_key = api_key
+        if client_id:
+            self.api_config.client_id = client_id
+        
+        # Initialize session parameters
         self.session_ttl_hours = session_ttl_hours
         self.backend_ttl_hours = backend_ttl_hours
         self.cleanup_interval_minutes = cleanup_interval_minutes
@@ -251,12 +269,21 @@ class AgentPerformanceTracker:
         self.max_offline_queue_size = max_offline_queue_size
         self.batch_notification_size = batch_notification_size
         
+        # For backward compatibility
+        self.base_url = self.api_config.base_url
+        self.client_id = self.api_config.client_id
+        
         # Setup secure logging
         self.logger = logger or logging.getLogger(__name__)
         self.secure_logger = SecureLogger()
         
-        # Initialize API client
-        self.api_client = SecureAPIClient(base_url, api_key)
+        # Initialize API client with configuration
+        self.api_client = SecureAPIClient(
+            base_url=self.api_config.base_url,
+            api_key=self.api_config.api_key,
+            client_id=self.api_config.client_id,
+            config=self.api_config
+        )
         
         # Performance metrics tracking
         self._performance_metrics = PerformanceMetrics()
