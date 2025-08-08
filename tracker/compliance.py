@@ -773,6 +773,7 @@ class ComplianceWrapper:
             raise
     
     def record_failed_session(self, session_id: str, error_message: str,
+                             error_type: Optional[str] = None,
                              metadata: Optional[Dict[str, Any]] = None) -> bool:
         """
         Record failed session with compliance logging and error message analysis
@@ -796,7 +797,7 @@ class ComplianceWrapper:
         """
         try:
             # Call wrapped tracker
-            result = self.wrapped_tracker.record_failed_session(session_id, error_message, metadata)
+            result = self.wrapped_tracker.record_failed_session(session_id, error_message, error_type=error_type, metadata=metadata)
             
             # Log compliance event
             if result and self.enable_compliance and self.compliance_manager:
