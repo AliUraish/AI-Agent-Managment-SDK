@@ -63,9 +63,13 @@ class LLMTracker:
             "timestamp": timestamp,
             "provider": self._validate_provider(provider),
             "model": model,
+            # SDK original fields
             "prompt_tokens": self._ensure_int(prompt_tokens),
             "completion_tokens": self._ensure_int(completion_tokens),
             "total_tokens": self._ensure_int(prompt_tokens) + self._ensure_int(completion_tokens),
+            # Backend-compatible aliases
+            "tokens_input": self._ensure_int(prompt_tokens),
+            "tokens_output": self._ensure_int(completion_tokens),
             "client_id": self.api_client.config.client_id
         }
         
@@ -92,7 +96,7 @@ class LLMTracker:
                 timestamp=timestamp
             )
             
-            response = self.api_client.make_request('POST', '/api/sdk/llm/usage', payload)
+            response = self.api_client.make_request('POST', '/api/sdk/llm-usage', payload)
             
             if response.success:
                 self.logger.info(f"LLM usage recorded: {model} ({provider})")
@@ -120,7 +124,7 @@ class LLMTracker:
                 timestamp=timestamp
             )
             
-            response = await self.api_client.make_request_async('POST', '/api/sdk/llm/usage', payload)
+            response = await self.api_client.make_request_async('POST', '/api/sdk/llm-usage', payload)
             
             if response.success:
                 self.logger.info(f"LLM usage recorded: {model} ({provider})")
