@@ -44,6 +44,7 @@ class TrackedAIAgent:
     def process_message(self, user_message: str, metadata: Optional[Dict[str, Any]] = None) -> str:
         """Process a user message with full tracking"""
         try:
+            session_id = None
             # Start conversation tracking
             session_id = self.performance_tracker.start_conversation(
                 agent_id=self.agent_id,
@@ -117,6 +118,7 @@ class TrackedAIAgent:
     async def process_message_async(self, user_message: str, metadata: Optional[Dict[str, Any]] = None) -> str:
         """Async version of message processing with tracking"""
         try:
+            session_id = None
             # Start conversation tracking
             session_id = await self.performance_tracker.start_conversation_async(
                 agent_id=self.agent_id,
