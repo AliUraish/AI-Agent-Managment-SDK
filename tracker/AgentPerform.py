@@ -4,7 +4,7 @@ import json
 import logging
 import asyncio
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any, Union, Deque
 from dataclasses import dataclass, asdict
 from enum import Enum
@@ -24,6 +24,11 @@ from .AgentOper import (
     validate_metadata,
     to_ms_timestamp
 )
+
+
+def _now_rfc3339() -> str:
+    """Return current time in RFC3339 format with Z (UTC), no microseconds"""
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
 
 
 @dataclass
@@ -128,13 +133,16 @@ class ConversationEndData:
 @dataclass
 class FailedSessionData:
     """Data for recording failed sessions with hybrid tracking"""
-    agent_id: str
     session_id: str
-    run_id: str
     error_message: str
+    error_type: Optional[str] = None
+    timestamp: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+    # Optional extended fields for richer reporting (retained for compatibility)
+    agent_id: Optional[str] = None
+    run_id: Optional[str] = None
     failure_time: Optional[str] = None
     duration_seconds: Optional[int] = None
-    metadata: Optional[Dict[str, Any]] = None
 
 @dataclass
 class SessionRetrievalQuery:
@@ -401,7 +409,7 @@ class AgentPerformanceTracker:
                         'resume': '/api/sdk/conversations/resume',
                         'batch_expired': '/api/sdk/conversations/batch-expired',
                         'evicted': '/api/sdk/conversations/evicted',
-                        'message': '/api/sdk/conversations/message',
+                        'message': '/api/sdk/messages',
                         'history': '/api/sdk/conversations/history'
                     }
                     
@@ -499,7 +507,7 @@ class AgentPerformanceTracker:
                         'failed': '/api/sdk/conversations/failed',
                         'expired': '/api/sdk/conversations/local-expired',
                         'resume': '/api/sdk/conversations/resume',
-                        'message': '/api/sdk/conversations/message',
+                        'message': '/api/sdk/messages',
                         'history': '/api/sdk/conversations/history'
                     }
                     
@@ -564,7 +572,7 @@ class AgentPerformanceTracker:
             
             # Try to send immediately, or queue offline
             if self._backend_available:
-                response = self._make_request("POST", "/conversations/evicted", eviction_data)
+                response = self._make_request("POST", "/api/sdk/conversations/evicted", eviction_data)
                 if not response.success:
                     self._queue_event_offline('evicted', eviction_data)
             else:
@@ -669,7 +677,7 @@ class AgentPerformanceTracker:
                 'was_ended': session_info.is_ended
             }
             
-            response = self._make_request("POST", "/conversations/local-expired", expiry_data)
+            response = self._make_request("POST", "/api/sdk/conversations/local-expired", expiry_data)
             
             if response.success:
                 self.logger.info(f"Notified backend about local expiry of session {session_id}")
@@ -894,7 +902,7 @@ class AgentPerformanceTracker:
             }
             
             if self._backend_available:
-                response = self._make_request("POST", "/conversations/batch-expired", batch_data)
+                response = self._make_request("POST", "/api/sdk/conversations/batch-expired", batch_data)
                 if response.success:
                     self.logger.info(f"Sent batch expiry notification for {len(batch)} sessions")
                 else:
@@ -994,7 +1002,7 @@ class AgentPerformanceTracker:
         data = asdict(ConversationStartData(
             session_id=session_id,
             agent_id=agent_id,
-            start_time=datetime.now().isoformat(),
+            start_time=_now_rfc3339(),
             metadata=metadata
         ))
         
@@ -1013,7 +1021,7 @@ class AgentPerformanceTracker:
         data = asdict(ConversationStartData(
             session_id=session_id,
             agent_id=agent_id,
-            start_time=datetime.now().isoformat(),
+            start_time=_now_rfc3339(),
             metadata=metadata
         ))
         
@@ -1033,7 +1041,7 @@ class AgentPerformanceTracker:
         """End a conversation with metrics"""
         data = asdict(ConversationEndData(
             session_id=session_id,
-            end_time=datetime.now().isoformat(),
+            end_time=_now_rfc3339(),
             quality_score=quality_score,
             user_feedback=user_feedback,
             message_count=message_count,
@@ -1056,7 +1064,7 @@ class AgentPerformanceTracker:
         """End a conversation with metrics (async)"""
         data = asdict(ConversationEndData(
             session_id=session_id,
-            end_time=datetime.now().isoformat(),
+            end_time=_now_rfc3339(),
             quality_score=quality_score,
             user_feedback=user_feedback,
             message_count=message_count,
@@ -1345,7 +1353,7 @@ class AgentPerformanceTracker:
     
     def get_session_info(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get session information from backend"""
-        response = self._make_request('GET', f'/conversations/{session_id}')
+        response = self._make_request('GET', f'/api/sdk/conversations/{session_id}')
         
         if response.success:
             return response.data
@@ -1355,7 +1363,7 @@ class AgentPerformanceTracker:
     
     async def get_session_info_async(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Async version of get_session_info"""
-        response = await self._make_request_async('GET', f'/conversations/{session_id}')
+        response = await self._make_request_async('GET', f'/api/sdk/conversations/{session_id}')
         
         if response.success:
             return response.data
@@ -1365,9 +1373,9 @@ class AgentPerformanceTracker:
     
     def get_active_conversations(self, agent_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Get active conversations from backend"""
-        endpoint = '/conversations/active'
+        endpoint = '/api/sdk/conversations/active'
         if agent_id:
-            endpoint = f'/conversations/active?agent_id={agent_id}'
+            endpoint = f'/api/sdk/conversations/active?agent_id={agent_id}'
         
         response = self._make_request('GET', endpoint)
         
@@ -1379,9 +1387,9 @@ class AgentPerformanceTracker:
     
     async def get_active_conversations_async(self, agent_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Async version of get_active_conversations"""
-        endpoint = '/conversations/active'
+        endpoint = '/api/sdk/conversations/active'
         if agent_id:
-            endpoint = f'/conversations/active?agent_id={agent_id}'
+            endpoint = f'/api/sdk/conversations/active?agent_id={agent_id}'
         
         response = await self._make_request_async('GET', endpoint)
         
@@ -1394,7 +1402,7 @@ class AgentPerformanceTracker:
     def _retrieve_session_from_backend(self, session_id: str) -> Optional[SessionInfo]:
         """Retrieve session information from backend when local cache expires"""
         try:
-            endpoint = f"/conversations/{session_id}"
+            endpoint = f"/api/sdk/conversations/{session_id}"
             response = self._make_request("GET", endpoint)
             
             if response.success and response.data:
@@ -1434,7 +1442,7 @@ class AgentPerformanceTracker:
     async def _retrieve_session_from_backend_async(self, session_id: str) -> Optional[SessionInfo]:
         """Retrieve session information from backend when local cache expires (async)"""
         try:
-            endpoint = f"/conversations/{session_id}"
+            endpoint = f"/api/sdk/conversations/{session_id}"
             response = await self._make_request_async("GET", endpoint)
             
             if response.success and response.data:
@@ -1654,7 +1662,7 @@ class AgentPerformanceTracker:
                 metadata=metadata
             ))
             
-            response = self._make_request("POST", "/conversations/resume", data)
+            response = self._make_request("POST", "/api/sdk/conversations/resume", data)
             
             if response.success:
                 self.logger.info(f"Successfully resumed conversation {session_id} for agent {agent_id}")
@@ -1703,7 +1711,7 @@ class AgentPerformanceTracker:
                 metadata=metadata
             ))
             
-            response = await self._make_request_async("POST", "/conversations/resume", data)
+            response = await self._make_request_async("POST", "/api/sdk/conversations/resume", data)
             
             if response.success:
                 self.logger.info(f"Successfully resumed conversation {session_id} for agent {agent_id}")
@@ -1823,13 +1831,13 @@ class AgentPerformanceTracker:
             session_id=session_id,
             role=role,
             content=content,
-            timestamp=datetime.now().isoformat(),
+            timestamp=_now_rfc3339(),
             response_time_ms=response_time_ms,
             tokens_used=tokens_used,
             metadata=metadata
         ))
         
-        response = self._make_request('POST', '/api/sdk/conversations/message', data)
+        response = self._make_request('POST', '/api/sdk/messages', data)
         
         if response.success:
             self.logger.info(f"Message logged for session {session_id}")
@@ -1847,13 +1855,13 @@ class AgentPerformanceTracker:
             session_id=session_id,
             role=role,
             content=content,
-            timestamp=datetime.now().isoformat(),
+            timestamp=_now_rfc3339(),
             response_time_ms=response_time_ms,
             tokens_used=tokens_used,
             metadata=metadata
         ))
         
-        response = await self._make_request_async('POST', '/api/sdk/conversations/message', data)
+        response = await self._make_request_async('POST', '/api/sdk/messages', data)
         
         if response.success:
             self.logger.info(f"Message logged for session {session_id}")
@@ -1908,7 +1916,7 @@ class AgentPerformanceTracker:
         ))
         
         # Send to backend
-        response = self._make_request('POST', '/conversations/history', history_data)
+        response = self._make_request('POST', '/api/sdk/conversations/history', history_data)
         
         if response.success:
             self.logger.info(f"Conversation history updated for session {session_id} ({total_messages} messages, {total_tokens} tokens)")
@@ -1953,7 +1961,7 @@ class AgentPerformanceTracker:
         ))
         
         # Send to backend
-        response = await self._make_request_async('POST', '/conversations/history', history_data)
+        response = await self._make_request_async('POST', '/api/sdk/conversations/history', history_data)
         
         if response.success:
             self.logger.info(f"Conversation history updated for session {session_id} ({total_messages} messages, {total_tokens} tokens)")
@@ -1985,7 +1993,7 @@ class AgentPerformanceTracker:
             params['limit'] = str(limit)
         
         query_string = '&'.join([f"{k}={v}" for k, v in params.items()])
-        endpoint = f'/conversations/{session_id}/history'
+        endpoint = f'/api/sdk/conversations/{session_id}/history'
         if query_string:
             endpoint += f'?{query_string}'
         
@@ -2008,7 +2016,7 @@ class AgentPerformanceTracker:
             params['limit'] = str(limit)
         
         query_string = '&'.join([f"{k}={v}" for k, v in params.items()])
-        endpoint = f'/conversations/{session_id}/history'
+        endpoint = f'/api/sdk/conversations/{session_id}/history'
         if query_string:
             endpoint += f'?{query_string}'
         
@@ -2023,17 +2031,17 @@ class AgentPerformanceTracker:
     def log_user_message(self, session_id: str, content: str, 
                         metadata: Optional[Dict[str, Any]] = None) -> bool:
         """Convenience method to log a user message"""
-        return self.log_message(session_id, "user", content, metadata=metadata)
+        return self.log_message(session_id, "user", content, metadata=metadata if metadata is not None else {})
     
     def log_agent_message(self, session_id: str, content: str, 
                          response_time_ms: Optional[int] = None,
                          tokens_used: Optional[int] = None,
                          metadata: Optional[Dict[str, Any]] = None) -> bool:
-        """Convenience method to log an agent message"""
-        return self.log_message(session_id, "agent", content, 
+        """Convenience method to log an agent (assistant) message"""
+        return self.log_message(session_id, "assistant", content, 
                                response_time_ms=response_time_ms,
                                tokens_used=tokens_used, 
-                               metadata=metadata)
+                               metadata=metadata if metadata is not None else {})
     
     def log_system_message(self, session_id: str, content: str,
                           metadata: Optional[Dict[str, Any]] = None) -> bool:
