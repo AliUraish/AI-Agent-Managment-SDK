@@ -18,6 +18,9 @@ import re
 # Environment variable names
 ENV_API_KEY = "SDK_API_KEY"
 ENV_CLIENT_ID = "SDK_CLIENT_ID"
+# New: control auth header formatting
+ENV_AUTH_RAW = "SDK_AUTH_RAW"  # if truthy, send RAW key in Authorization header (no Bearer prefix)
+ENV_AUTH_HEADER_NAME = "SDK_AUTH_HEADER_NAME"  # default: Authorization
 
 
 @dataclass
@@ -91,7 +94,7 @@ class SecureLogger:
 @dataclass
 class APIConfig:
     """API configuration with defaults"""
-    base_url: str = "http://localhost:8080/api"
+    base_url: str = "http://localhost:8080"
     api_key: Optional[str] = None  # Should be provided via environment variable or secure configuration
     client_id: Optional[str] = None  # Should be provided during initialization
     max_retries: int = 3
@@ -99,13 +102,27 @@ class APIConfig:
     max_delay: float = 8.0    # Maximum delay in seconds
     timeout: float = 30.0     # Request timeout in seconds
     rate_limit: int = 5000    # Requests per minute
+    # New: auth header controls
+    use_raw_authorization: bool = False
+    authorization_header_name: str = "Authorization"
     
     def __post_init__(self):
         """Initialize API key and client ID from environment if not provided"""
         if self.api_key is None:
             self.api_key = os.getenv(ENV_API_KEY)
+        # Sanitize api_key to remove surrounding quotes/whitespace
+        if isinstance(self.api_key, str):
+            self.api_key = self.api_key.strip().strip('"').strip("'")
         if self.client_id is None:
             self.client_id = os.getenv(ENV_CLIENT_ID)
+        
+        # Read auth header controls from env if present
+        raw_flag = os.getenv(ENV_AUTH_RAW)
+        if raw_flag is not None and str(raw_flag).strip().lower() in {"1", "true", "yes"}:
+            self.use_raw_authorization = True
+        header_name = os.getenv(ENV_AUTH_HEADER_NAME)
+        if header_name:
+            self.authorization_header_name = header_name.strip()
             
         if self.api_key is None:
             raise ValueError(
@@ -132,7 +149,7 @@ class SecureAPIClient:
             self.config.api_key = api_key
         if client_id:
             self.config.client_id = client_id
-            
+        
         # Initialize rate limiter
         self.rate_limiter = RateLimiter(
             max_requests=self.config.rate_limit,
@@ -151,12 +168,19 @@ class SecureAPIClient:
     
     def _get_headers(self) -> Dict[str, str]:
         """Get request headers with API key"""
-        return {
-            'Authorization': f'Bearer {self.config.api_key}',
+        # Build Authorization header according to config
+        if self.config.use_raw_authorization:
+            auth_value = f"{self.config.api_key}"
+        else:
+            auth_value = f"Bearer {self.config.api_key}"
+        
+        headers = {
+            self.config.authorization_header_name: auth_value,
             'X-Client-ID': self.config.client_id,
             'Content-Type': 'application/json',
             'User-Agent': f'SDK-Agent-Tracker/1.0 (Client: {self.config.client_id})'
         }
+        return headers
     
     def get_session(self) -> requests.Session:
         """Get or create requests session"""
