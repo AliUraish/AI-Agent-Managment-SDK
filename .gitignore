@@ -160,3 +160,5 @@ temp/
 .temp/
 *.tmp
 *.temp 
+#mdc files
+.mdc
